@@ -18,7 +18,7 @@ $LocalDB    = "cs2"
 $RemoteHost = "172.31.255.62"
 $RemotePort = 5432
 $RemoteUser = "postgres"
-$RemotePass = "cs2monitor"
+$RemotePass = "SoupR"
 $RemoteDB   = "cs2"
 
 $StateFile = Join-Path $PSScriptRoot "win_sync_state.json"
