@@ -25,6 +25,18 @@ $StateFile = Join-Path $PSScriptRoot "win_sync_state.json"
 $LogFile   = Join-Path $PSScriptRoot "win_sync.log"
 $BatchSize = 5000
 
+$tables = @(
+    "double_value_change_events",
+    "int_value_change_events",
+    "boolean_value_change_events",
+    "string_value_change_events",
+    "json_value_change_events",
+    "device_events",
+    "alerts",
+    "automation_events",
+    "user_log_entries"
+)
+
 # --- Locate psql.exe ---
 $psqlPaths = @(
     "C:\Program Files\PostgreSQL\17\bin\psql.exe",
@@ -54,18 +66,33 @@ function RunPsql($h, $p, $u, $pw, $db, $sql) {
 function LoadState() {
     if (Test-Path $StateFile) {
         $json = Get-Content $StateFile -Raw | ConvertFrom-Json
-        # Build hashtable manually (compatible with PowerShell 5.1)
         $ht = @{}
         foreach ($prop in $json.PSObject.Properties) {
             $ht[$prop.Name] = @{ last_id = [int]$prop.Value.last_id }
         }
         return $ht
     }
-    return @{}
+    return $null
 }
 
 function SaveState($state) {
     $state | ConvertTo-Json -Depth 3 | Set-Content $StateFile
+}
+
+function InitStateFromRemote() {
+    # On first run: start from the Raspberry Pi's current max IDs
+    # This skips re-syncing the backup data already on the Pi
+    Log "First run - initialising sync position from Raspberry Pi..."
+    $state = @{}
+    foreach ($tbl in $tables) {
+        $maxId = RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB `
+            "SELECT COALESCE(MAX(id), 0) FROM public.$tbl"
+        $maxId = ($maxId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+        if (-not $maxId) { $maxId = 0 }
+        $state[$tbl] = @{ last_id = [int]$maxId }
+        Log "  $tbl : will sync from id > $maxId"
+    }
+    return $state
 }
 
 # --- Install as scheduled task ---
@@ -93,6 +120,7 @@ if ($Install) {
 # --- Main sync ---
 Log "=== Sync started ==="
 
+# Test remote connection
 $test = RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "SELECT 1"
 if ($LASTEXITCODE -ne 0) {
     Log "ERROR: Cannot connect to Raspberry Pi $RemoteHost"
@@ -100,36 +128,30 @@ if ($LASTEXITCODE -ne 0) {
 }
 Log "Connected to Raspberry Pi OK"
 
-# Test local CS2 database connection (show errors so we can debug)
+# Test local CS2 connection
 $env:PGPASSWORD = $LocalPass
-$localTest = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB -t -A -c "SELECT COUNT(*) FROM double_value_change_events;" 2>&1
+$localTest = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB -t -A `
+    -c "SELECT COUNT(*) FROM double_value_change_events;" 2>&1
 if ($LASTEXITCODE -ne 0) {
-    Log "ERROR: Cannot connect to local CS2 database. Details: $localTest"
-    Log "Check: is PostgreSQL running? Is the password correct? Is the database named 'cs2'?"
+    Log "ERROR: Cannot connect to local CS2 database - $localTest"
     exit 1
 }
 Log "Local CS2 database OK - $localTest rows in double_value_change_events"
 
+# Load or initialise state
 $state = LoadState
-$total = 0
+if ($null -eq $state) {
+    $state = InitStateFromRemote
+    SaveState $state
+}
 
-$tables = @(
-    "double_value_change_events",
-    "int_value_change_events",
-    "boolean_value_change_events",
-    "string_value_change_events",
-    "json_value_change_events",
-    "device_events",
-    "alerts",
-    "automation_events",
-    "user_log_entries"
-)
+$total = 0
 
 foreach ($tbl in $tables) {
     $lastId = 0
     if ($state.ContainsKey($tbl)) { $lastId = $state[$tbl].last_id }
 
-    # Export new rows from local DB (stderr suppressed)
+    # Export new rows from local CS2
     $env:PGPASSWORD = $LocalPass
     $copyOut = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
         -c "\copy (SELECT * FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) TO stdout WITH CSV" `
@@ -138,13 +160,12 @@ foreach ($tbl in $tables) {
     $lines = @($copyOut | Where-Object { $_ -and $_ -ne "" })
     if ($lines.Count -eq 0) { continue }
 
-    # Import to Raspberry Pi
+    # Import to Raspberry Pi (no ON CONFLICT needed - we only send new rows)
     $env:PGPASSWORD = $RemotePass
     $importErr = $lines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
-        -c "\copy public.$tbl FROM stdin WITH CSV ON CONFLICT (id) DO NOTHING" 2>&1
+        -c "\copy public.$tbl FROM stdin WITH CSV" 2>&1
 
     if ($LASTEXITCODE -eq 0) {
-        # Get the max id actually in this batch (subquery avoids upper-bound range bug with sparse IDs)
         $newId = RunPsql $LocalHost $LocalPort $LocalUser $LocalPass $LocalDB `
             "SELECT id FROM (SELECT id FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) t ORDER BY id DESC LIMIT 1"
         $newId = ($newId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
@@ -158,16 +179,17 @@ foreach ($tbl in $tables) {
     }
 }
 
-# device_states: full UPSERT (no id column, keyed by device_id)
+# device_states: full refresh (no id column)
 $env:PGPASSWORD = $LocalPass
 $dsData = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
     -c "\copy (SELECT * FROM public.device_states) TO stdout WITH CSV" 2>$null
 $dsLines = @($dsData | Where-Object { $_ -and $_ -ne "" })
 if ($dsLines.Count -gt 0) {
     $env:PGPASSWORD = $RemotePass
+    # Clear and re-import device states
+    RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "TRUNCATE public.device_states" | Out-Null
     $dsLines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
-        -c "\copy public.device_states FROM stdin WITH CSV ON CONFLICT (device_id) DO UPDATE SET datetime=EXCLUDED.datetime, values=EXCLUDED.values" `
-        2>$null | Out-Null
+        -c "\copy public.device_states FROM stdin WITH CSV" 2>$null | Out-Null
     Log "  device_states: updated $($dsLines.Count) devices"
 }
 
