@@ -1,67 +1,95 @@
 # BlueFors CS2 Monitor
 
-Real-time monitoring and Slack alerting for a BlueFors dilution refrigerator (CS2 control system).
+Real-time monitoring and Slack alerting for a BlueFors dilution refrigerator (CS2 control system).  
+Data is synced every minute from the Windows CS2 PC to a Raspberry Pi, which runs anomaly detection and sends Slack notifications.
+
+---
+
+## Table of Contents
+
+1. [Architecture](#architecture)
+2. [Network](#network)
+3. [Raspberry Pi Setup](#raspberry-pi-setup)
+4. [Database Backup Restore](#database-backup-restore)
+5. [Windows Sync Script — sync_push.ps1](#windows-sync-script--sync_pushps1)
+6. [Monitor Script — monitor.py](#monitor-script--monitorpy)
+7. [Configuration — config.py](#configuration--configpy)
+8. [Slack App Setup](#slack-app-setup)
+9. [Starting the System](#starting-the-system)
+10. [Slack Interaction](#slack-interaction)
+11. [Database Schema](#database-schema)
+12. [Sensor Mappings](#sensor-mappings)
+13. [Troubleshooting](#troubleshooting)
+14. [File Reference](#file-reference)
+
+---
 
 ## Architecture
 
 ```
-Windows PC (BlueFors CS2)                  Raspberry Pi
-┌─────────────────────────────┐            ┌──────────────────────────────┐
-│  CS2 Control Software       │            │  PostgreSQL 17 (port 5432)   │
-│  PostgreSQL 14.9 (port 5434)│            │  /mnt/harddrive/cs2_database │
-│                             │            │                              │
-│  sync_push.ps1 ─────────────┼──SSH──────►│  cs2 database (mirror)       │
-│  (Windows Task Scheduler,   │            │                              │
-│   every 1 minute)           │            │  monitor.py ─────────────────┼──► Slack
-└─────────────────────────────┘            │  (cron, every 1 minute)      │
-                                           └──────────────────────────────┘
+Windows PC (BlueFors CS2)                    Raspberry Pi
+┌──────────────────────────────┐             ┌────────────────────────────────┐
+│  CS2 Control Software        │             │  PostgreSQL 17  (port 5432)    │
+│  PostgreSQL 14.9 (port 5434) │             │  /mnt/harddrive/cs2_database   │
+│                              │   TCP 5432  │                                │
+│  sync_push.ps1  ─────────────┼────────────►│  cs2 database  (mirror)        │
+│  Windows Task Scheduler      │             │                                │
+│  every 1 minute              │             │  monitor.py  ──────────────────┼──► Slack
+└──────────────────────────────┘             │  cron, every 1 minute          │
+                                             └────────────────────────────────┘
 ```
 
-- **Windows PC** runs BlueFors CS2 and holds the live PostgreSQL database (port 5434).  
-- **Raspberry Pi** holds a mirror copy stored on an external hard drive. A PowerShell script running on Windows pushes new rows every minute.  
-- **monitor.py** on the Raspberry Pi checks the mirror for threshold violations and forwards CS2 system alerts to Slack.
-
-### Why push from Windows instead of pull from Pi
-
-The Raspberry Pi cannot initiate a connection to the Windows machine (no inbound access), but the Windows machine can reach the Pi. The PowerShell script runs as a Windows Scheduled Task and pushes data outward.
+**Why Windows pushes to Pi instead of Pi pulling from Windows:**  
+The Pi cannot initiate a TCP connection to the Windows machine (no open inbound port on Windows).  
+The Windows machine can reach the Pi on port 5432. So the PowerShell script runs as a Windows Scheduled Task and pushes data outward every minute.
 
 ---
 
 ## Network
 
-| Machine | IP | Role |
-|---|---|---|
-| Windows PC (BlueFors CS2) | 172.31.255.10 | Data source |
-| Raspberry Pi | 172.31.255.62 | Monitor / alert hub |
+| Machine | IP | OS | Role |
+|---|---|---|---|
+| BlueFors CS2 PC | 172.31.255.10 | Windows | Data source (CS2 + PostgreSQL 14.9 on port 5434) |
+| Raspberry Pi | 172.31.255.62 | Raspberry Pi OS 64-bit | Monitor hub (PostgreSQL 17 on port 5432) |
 
 ---
 
-## Prerequisites
+## Raspberry Pi Setup
 
-### Raspberry Pi
-
-- Raspberry Pi OS (64-bit)  
-- PostgreSQL 17  
-- Python 3.x with packages: `psycopg2-binary`, `requests`  
-- External hard drive mounted at `/mnt/harddrive`  
-
-### Windows PC
-
-- PostgreSQL client tools (`psql.exe`) — installed with any PostgreSQL version  
-- PowerShell 5.1 or later  
-- Network access to the Raspberry Pi on port 5432  
-
----
-
-## Setup: Raspberry Pi
-
-### 1. Create the database
+### 1. Install PostgreSQL 17
 
 ```bash
-sudo -u postgres psql -c "CREATE DATABASE cs2;"
+sudo apt update
+sudo apt install -y postgresql
 ```
 
-### 2. Configure PostgreSQL for remote connections
+Verify the version:
+
+```bash
+psql --version
+# postgresql 17.x
+```
+
+### 2. Move data directory to external hard drive
+
+The CS2 database is large. Store it on the mounted external drive instead of the SD card.
+
+Edit `/etc/postgresql/17/main/postgresql.conf`:
+
+```
+data_directory = '/mnt/harddrive/cs2_database/main'
+```
+
+Copy the existing data directory to the drive, then restart:
+
+```bash
+sudo systemctl stop postgresql
+sudo rsync -av /var/lib/postgresql/17/main/ /mnt/harddrive/cs2_database/main/
+sudo chown -R postgres:postgres /mnt/harddrive/cs2_database/
+sudo systemctl start postgresql
+```
+
+### 3. Allow remote connections
 
 Edit `/etc/postgresql/17/main/postgresql.conf`:
 
@@ -69,42 +97,38 @@ Edit `/etc/postgresql/17/main/postgresql.conf`:
 listen_addresses = '*'
 ```
 
-Edit `/etc/postgresql/17/main/pg_hba.conf` — add this line:
+Edit `/etc/postgresql/17/main/pg_hba.conf` — add this line (allows the whole local subnet):
 
 ```
 host    cs2    postgres    172.31.255.0/16    md5
 ```
 
-Set the postgres user password:
+Set the `postgres` user password:
 
 ```bash
 sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'cs2monitor';"
 ```
 
-Restart PostgreSQL:
+Restart PostgreSQL to apply:
 
 ```bash
 sudo systemctl restart postgresql
 ```
 
-### 3. Open the firewall
+### 4. Open the firewall
 
 ```bash
 sudo ufw allow from 172.31.255.0/16 to any port 5432
+sudo ufw status    # verify: port 5432 appears in the list
 ```
 
-### 4. Restore the database backup
-
-The CS2 database was exported from Windows using `pg_dump` and restored on the Pi:
+### 5. Create the database
 
 ```bash
-export PGPASSWORD=cs2monitor
-pg_restore -h localhost -U postgres -d cs2 -v cs2_backup.dump
+sudo -u postgres psql -c "CREATE DATABASE cs2;"
 ```
 
-Data is stored under `/mnt/harddrive/cs2_database/main` (PostgreSQL data directory configured via `data_directory` in `postgresql.conf`).
-
-### 5. Install Python dependencies
+### 6. Install Python dependencies
 
 ```bash
 pip3 install psycopg2-binary requests
@@ -112,35 +136,261 @@ pip3 install psycopg2-binary requests
 
 ---
 
-## Setup: Windows PC
+## Database Backup Restore
 
-### 1. Copy the sync script
+The initial data was exported from the Windows CS2 machine using `pg_dump` and restored on the Pi.
 
-Copy `sync_push.ps1` to `C:\bluefors_monitor\` on the Windows machine.
+**On the Windows machine** — export the CS2 database:
 
 ```powershell
-# From Raspberry Pi
-scp /home/cdms/bluefors_monitor/sync_push.ps1 cdms@172.31.255.62:/tmp/
-# Then from Windows, pull from Pi (or copy via USB / shared drive)
+# Run in PowerShell on the Windows CS2 machine
+$env:PGPASSWORD = "postgres"
+& "C:\Program Files\PostgreSQL\14\bin\pg_dump.exe" `
+    -h localhost -p 5434 -U postgres -d cs2 `
+    -F c -f "C:\bluefors_monitor\cs2_backup.dump"
 ```
 
-Or use SCP from another machine to push it directly to `C:\bluefors_monitor\`.
+**Copy the file to the Pi** (run from a machine that can reach both, or use a USB drive):
 
-### 2. Verify psql.exe is available
-
-The script looks for `psql.exe` in the default PostgreSQL installation paths:
-
-```
-C:\Program Files\PostgreSQL\17\bin\psql.exe
-C:\Program Files\PostgreSQL\16\bin\psql.exe
-...
+```bash
+scp cdms@172.31.255.10:"C:/bluefors_monitor/cs2_backup.dump" /home/cdms/
 ```
 
-If none are found, the script exits with an error.
+**Restore on the Pi:**
 
-### 3. Run once to verify
+```bash
+export PGPASSWORD=cs2monitor
+pg_restore -h localhost -U postgres -d cs2 -v /home/cdms/cs2_backup.dump
+```
 
-Open PowerShell and run:
+Verify the restore:
+
+```bash
+PGPASSWORD=cs2monitor psql -h localhost -U postgres -d cs2 \
+    -c "SELECT COUNT(*) FROM double_value_change_events;"
+# Should show ~3.6 million rows
+```
+
+---
+
+## Windows Sync Script — sync_push.ps1
+
+Place this file at `C:\bluefors_monitor\sync_push.ps1` on the Windows CS2 machine.
+
+**How to copy it from the Pi to Windows:**
+
+```powershell
+# Run in PowerShell on the Windows machine
+scp cdms@172.31.255.62:/home/cdms/bluefors_monitor/sync_push.ps1 C:\bluefors_monitor\sync_push.ps1
+```
+
+### Full code
+
+```powershell
+# BlueFors CS2 -> Raspberry Pi data sync script
+# Uses psql.exe (bundled with PostgreSQL) - no Python or extra installs needed.
+# Compatible with Windows PowerShell 5.1+
+#
+# Usage:
+#   powershell -ExecutionPolicy Bypass -File sync_push.ps1           # run once
+#   powershell -ExecutionPolicy Bypass -File sync_push.ps1 -Install  # register scheduled task
+
+param([switch]$Install)
+
+# --- Configuration ---
+$LocalHost  = "localhost"
+$LocalPort  = 5434          # CS2's PostgreSQL (NOT the default 5432)
+$LocalUser  = "postgres"
+$LocalPass  = "postgres"
+$LocalDB    = "cs2"
+
+$RemoteHost = "172.31.255.62"
+$RemotePort = 5432
+$RemoteUser = "postgres"
+$RemotePass = "cs2monitor"
+$RemoteDB   = "cs2"
+
+$StateFile = Join-Path $PSScriptRoot "win_sync_state.json"
+$LogFile   = Join-Path $PSScriptRoot "win_sync.log"
+$BatchSize = 5000
+
+$tables = @(
+    "double_value_change_events",
+    "int_value_change_events",
+    "boolean_value_change_events",
+    "string_value_change_events",
+    "json_value_change_events",
+    "device_events",
+    "alerts",
+    "automation_events",
+    "user_log_entries"
+)
+
+# --- Locate psql.exe ---
+$psqlPaths = @(
+    "C:\Program Files\PostgreSQL\17\bin\psql.exe",
+    "C:\Program Files\PostgreSQL\16\bin\psql.exe",
+    "C:\Program Files\PostgreSQL\15\bin\psql.exe",
+    "C:\Program Files\PostgreSQL\14\bin\psql.exe",
+    "C:\Program Files\PostgreSQL\13\bin\psql.exe"
+)
+$psql = $psqlPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $psql) {
+    Write-Error "psql.exe not found. Please verify PostgreSQL is installed."
+    exit 1
+}
+
+function Log($msg) {
+    $line = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') $msg"
+    Add-Content $LogFile $line
+    Write-Host $line
+}
+
+function RunPsql($h, $p, $u, $pw, $db, $sql) {
+    $env:PGPASSWORD = $pw
+    $result = & $psql -h $h -p $p -U $u -d $db -t -A -c $sql 2>$null
+    return $result
+}
+
+function LoadState() {
+    if (Test-Path $StateFile) {
+        $json = Get-Content $StateFile -Raw | ConvertFrom-Json
+        $ht = @{}
+        foreach ($prop in $json.PSObject.Properties) {
+            $ht[$prop.Name] = @{ last_id = [int]$prop.Value.last_id }
+        }
+        return $ht
+    }
+    return $null
+}
+
+function SaveState($state) {
+    $state | ConvertTo-Json -Depth 3 | Set-Content $StateFile
+}
+
+function InitStateFromRemote() {
+    Log "First run - initialising sync position from Raspberry Pi..."
+    $state = @{}
+    foreach ($tbl in $tables) {
+        $maxId = RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB `
+            "SELECT COALESCE(MAX(id), 0) FROM public.$tbl"
+        $maxId = ($maxId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+        if (-not $maxId) { $maxId = 0 }
+        $state[$tbl] = @{ last_id = [int]$maxId }
+        Log "  $tbl : will sync from id > $maxId"
+    }
+    return $state
+}
+
+# --- Install as scheduled task ---
+if ($Install) {
+    $script   = $PSCommandPath
+    $action   = New-ScheduledTaskAction `
+                    -Execute "powershell.exe" `
+                    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`"" `
+                    -WorkingDirectory $PSScriptRoot
+    $trigger  = New-ScheduledTaskTrigger `
+                    -Once `
+                    -At (Get-Date) `
+                    -RepetitionInterval (New-TimeSpan -Minutes 1)
+    $settings = New-ScheduledTaskSettingsSet `
+                    -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
+                    -MultipleInstances IgnoreNew
+    Unregister-ScheduledTask -TaskName "BlueForsSync" -Confirm:$false -ErrorAction SilentlyContinue
+    Register-ScheduledTask -TaskName "BlueForsSync" `
+        -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
+    Write-Host "Scheduled task 'BlueForsSync' installed - runs every minute." -ForegroundColor Green
+    exit 0
+}
+
+# --- Main sync ---
+Log "=== Sync started ==="
+
+$test = RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "SELECT 1"
+if ($LASTEXITCODE -ne 0) {
+    Log "ERROR: Cannot connect to Raspberry Pi $RemoteHost"
+    exit 1
+}
+Log "Connected to Raspberry Pi OK"
+
+$env:PGPASSWORD = $LocalPass
+$localTest = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB -t -A `
+    -c "SELECT COUNT(*) FROM double_value_change_events;" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Log "ERROR: Cannot connect to local CS2 database - $localTest"
+    exit 1
+}
+Log "Local CS2 database OK - $localTest rows in double_value_change_events"
+
+$state = LoadState
+if ($null -eq $state -or $state.Count -eq 0) {
+    $state = InitStateFromRemote
+    SaveState $state
+}
+
+$total = 0
+
+foreach ($tbl in $tables) {
+    $lastId = 0
+    if ($state.ContainsKey($tbl)) { $lastId = $state[$tbl].last_id }
+
+    $env:PGPASSWORD = $LocalPass
+    $copyOut = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
+        -c "\copy (SELECT * FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) TO stdout WITH CSV" `
+        2>$null
+
+    $lines = @($copyOut | Where-Object { $_ -and $_ -ne "" })
+    if ($lines.Count -eq 0) { continue }
+
+    $env:PGPASSWORD = $RemotePass
+    $importErr = $lines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
+        -c "\copy public.$tbl FROM stdin WITH CSV" 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        $newId = RunPsql $LocalHost $LocalPort $LocalUser $LocalPass $LocalDB `
+            "SELECT id FROM (SELECT id FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) t ORDER BY id DESC LIMIT 1"
+        $newId = ($newId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+        if ($newId) {
+            $state[$tbl] = @{ last_id = [int]$newId }
+            $total += $lines.Count
+            Log "  $tbl : +$($lines.Count) rows (last id: $newId)"
+        }
+    } else {
+        Log "  $tbl : import failed - $importErr"
+    }
+}
+
+# device_states: full refresh (no id column — always overwrite)
+$env:PGPASSWORD = $LocalPass
+$dsData = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
+    -c "\copy (SELECT * FROM public.device_states) TO stdout WITH CSV" 2>$null
+$dsLines = @($dsData | Where-Object { $_ -and $_ -ne "" })
+if ($dsLines.Count -gt 0) {
+    $env:PGPASSWORD = $RemotePass
+    RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "TRUNCATE public.device_states" | Out-Null
+    $dsLines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
+        -c "\copy public.device_states FROM stdin WITH CSV" 2>$null | Out-Null
+    Log "  device_states: updated $($dsLines.Count) devices"
+}
+
+SaveState $state
+Log "=== Sync done: +$total rows total ==="
+```
+
+### How it works — step by step
+
+| Step | What happens |
+|---|---|
+| 1 | Script starts, locates `psql.exe` in standard PostgreSQL install paths |
+| 2 | Connects to Raspberry Pi PostgreSQL (172.31.255.62:5432) — exits if unreachable |
+| 3 | Connects to local CS2 PostgreSQL (localhost:5434) — exits if unreachable |
+| 4 | Loads `win_sync_state.json` which records the last synced row ID per table |
+| 5 | **First run only:** queries the Pi for `MAX(id)` of each table; starts syncing from there (skips backup data already on the Pi) |
+| 6 | For each table: exports up to 5000 new rows as CSV via `\copy … TO stdout`, then pipes them into the Pi via `\copy … FROM stdin` |
+| 7 | `device_states` has no `id` column — truncates and re-imports the full table every run |
+| 8 | Saves updated state to `win_sync_state.json` |
+
+### Run it manually (test)
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1
@@ -154,185 +404,216 @@ Expected output on first run:
 2026-06-18 19:33:49 Local CS2 database OK - 4484137 rows in double_value_change_events
 2026-06-18 19:33:49 First run - initialising sync position from Raspberry Pi...
 2026-06-18 19:33:49   double_value_change_events : will sync from id > 3649339
+2026-06-18 19:33:49   int_value_change_events : will sync from id > 56375
 ...
+2026-06-18 19:33:53   device_states: updated 50 devices
 2026-06-18 19:33:53 === Sync done: +27178 rows total ===
 ```
 
-On first run the script queries the Raspberry Pi for the current maximum row ID in each table and stores that as the starting point (`win_sync_state.json`). Only rows with IDs greater than that value are synced going forward, so the backup data already on the Pi is never re-sent.
+### Install as a Windows Scheduled Task
 
-### 4. Install as a Scheduled Task
-
-Run PowerShell **as Administrator**:
+Run PowerShell **as Administrator** (right-click → Run as administrator):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1 -Install
 ```
 
-This registers a Windows Scheduled Task named `BlueForsSync` that runs every minute indefinitely.
+This creates a task named `BlueForsSync` that runs every minute with no time limit.
 
-Verify it is active:
+Verify it is running:
 
 ```powershell
 Get-ScheduledTask -TaskName "BlueForsSync" | Select-Object TaskName, State
+# State should be: Ready
+```
+
+View the log:
+
+```powershell
+Get-Content C:\bluefors_monitor\win_sync.log -Tail 20
 ```
 
 ---
 
-## How sync_push.ps1 works
+## Monitor Script — monitor.py
 
-```
-┌─────────────────────────────────────────────┐
-│  sync_push.ps1 (runs every minute)          │
-│                                             │
-│  1. Connect to CS2 PostgreSQL (port 5434)   │
-│  2. Connect to Pi PostgreSQL  (port 5432)   │
-│  3. Load win_sync_state.json                │
-│     └─ first run? init from Pi max IDs      │
-│  4. For each table:                         │
-│     a. \copy rows WHERE id > last_id        │
-│        LIMIT 5000  →  stdout (CSV)          │
-│     b. Pipe CSV into Pi via \copy FROM stdin│
-│     c. Update last_id in state              │
-│  5. device_states: TRUNCATE + full refresh  │
-│  6. Save win_sync_state.json                │
-└─────────────────────────────────────────────┘
-```
+Runs every minute on the Raspberry Pi via cron. Checks the local database for anomalies and forwards alerts to Slack.
 
-Tables synced:
+### Full code
 
-| Table | Key column | Description |
+See [`monitor.py`](monitor.py) in this repository.
+
+### How it works — step by step
+
+Each run does the following in order:
+
+| Step | Function | What it does |
 |---|---|---|
-| `double_value_change_events` | `id` | Temperature, pressure, flow readings |
-| `int_value_change_events` | `id` | Integer sensor values |
-| `boolean_value_change_events` | `id` | Boolean device states |
-| `string_value_change_events` | `id` | String sensor values |
-| `json_value_change_events` | `id` | JSON payloads |
-| `device_events` | `id` | Device lifecycle events |
-| `alerts` | `id` | CS2 system alerts |
-| `automation_events` | `id` | Automation log |
-| `user_log_entries` | `id` | User activity |
-| `device_states` | — | Current state of all 50 devices (full refresh) |
+| 1 | `check_acknowledgements()` | Polls Slack for reactions (✅ 👏 👍 🤙) or thread replies (`ok`/`OK`) on previous alert messages; silences that sensor for 10 min if found |
+| 2 | `check_commands()` | Reads new `@BlueFors-Alert` mentions in the channel; parses and executes threshold-change or ack commands |
+| 3 | `check_data_freshness()` | Queries `MAX(time)` from `double_value_change_events`; fires an alert if data is more than 5 minutes old (with 30-min cooldown to avoid spam) |
+| 4 | `check_sensor_thresholds()` | For each sensor in `THRESHOLDS`: fetches latest value, compares to limit, sends alert if exceeded and cooldown has passed |
+| 5 | `check_cs2_alerts()` | Fetches new rows from the `alerts` table with `severity >= CS2_ALERT_MIN_SEVERITY`; batches by error code and forwards to Slack |
+| 6 | Send + track | Sends all queued Slack messages; saves each message's `ts` (timestamp) so reactions on it can be checked next run |
+| 7 | `save_state()` | Writes `monitor_state.json` — persists last alert times, last CS2 alert ID, acknowledgements, threshold overrides |
 
-State is persisted in `win_sync_state.json` so each run only fetches new rows.
+### State file (monitor_state.json)
 
----
-
-## Database schema (key tables)
-
-### double_value_change_events
-
-Stores every numerical sensor reading.
-
-```sql
-id       BIGINT PRIMARY KEY
-time     TIMESTAMPTZ
-mapping  VARCHAR   -- sensor name, e.g. "MXC_TEMPERATURE"
-value    DOUBLE PRECISION
-value_id VARCHAR
-```
-
-### alerts
-
-CS2 system alerts (errors and warnings generated by the control software).
-
-```sql
-id                  BIGINT PRIMARY KEY
-code                INTEGER
-datetime            TIMESTAMPTZ
-description         VARCHAR
-title               VARCHAR
-severity            INTEGER   -- 1 = warning, 2 = error
-originator          VARCHAR
-resolution_datetime TIMESTAMPTZ
-resolved_by         VARCHAR
-```
-
-### device_states
-
-Current state snapshot of all connected devices.
-
-```sql
-datetime   TIMESTAMPTZ
-device_id  VARCHAR PRIMARY KEY
-values     JSONB
+```json
+{
+  "last_alert_time": {
+    "MXC_TEMPERATURE": "2026-06-18T14:23:00"
+  },
+  "last_cs2_alert_id": 1156,
+  "acked_sensors": {
+    "MXC_TEMPERATURE": "2026-06-18T14:33:00"
+  },
+  "pending_alert_msgs": {
+    "MXC_TEMPERATURE": { "ts": "1781830413.557959", "channel": "C0B42G4AU0N" }
+  },
+  "threshold_overrides": {
+    "MXC_TEMPERATURE": { "max_val": 0.05, "min_val": null, "expires_at": "2026-06-18T14:33:00" }
+  },
+  "last_slack_ts": "1781830413.557959",
+  "last_freshness_alert": "2026-06-18T14:00:00"
+}
 ```
 
 ---
 
-## Sensor mappings (double_value_change_events)
+## Configuration — config.py
 
-All sensors found in the CS2 database:
-
-| Mapping | Unit | Description |
-|---|---|---|
-| `MXC_TEMPERATURE` | K | Mixing chamber temperature |
-| `MXC_TEMPERATURE_FAR` | K | Mixing chamber far-end temperature |
-| `STILL_TEMPERATURE` | K | Still temperature |
-| `4K_TEMPERATURE` | K | 4K plate temperature |
-| `50K_TEMPERATURE` | K | 50K plate temperature |
-| `B1A_TEMPERATURE` | K | B1A stage temperature |
-| `B2_TEMPERATURE` | K | B2 stage temperature |
-| `P1_PRESSURE` | mbar | Return line pressure |
-| `P2_PRESSURE` | mbar | Still pressure |
-| `P3_PRESSURE` | mbar | Condenser pressure |
-| `P4_PRESSURE` | mbar | Pumping line pressure |
-| `P5_PRESSURE` | mbar | MXC pressure |
-| `P6_PRESSURE` | mbar | Backing pressure |
-| `P7_PRESSURE` | mbar | Foreline pressure |
-| `FLOW_VALUE` | mmol/s | Helium flow rate |
-| `HELIUM_TANK_VALUE` | — | Helium tank level |
-| `MXC_HEATING_POWER` | W | MXC heater power |
-| `STILL_HEATING_POWER` | W | Still heater power |
-| `MXC_TARGET_TEMPERATURE` | K | MXC setpoint |
-| `STILL_TARGET_TEMPERATURE` | K | Still setpoint |
-| `COM_PUMP_POWER` | W | Compressor pump power |
-| `R1A_PUMP_POWER` | W | R1A pump power |
-| `R2_PUMP_POWER` | W | R2 pump power |
-
----
-
-## Setup: monitor.py
-
-### config.py
-
-Edit `/home/cdms/bluefors_monitor/config.py` to set thresholds and Slack credentials:
+Located at `/home/cdms/bluefors_monitor/config.py` on the Raspberry Pi.  
+**Not committed to GitHub** (contains credentials).
 
 ```python
-SLACK_BOT_TOKEN = "xoxb-..."      # Slack bot token
-SLACK_CHANNEL   = "C0B42G4AU0N"   # Slack channel ID
+# BlueFors Monitor Configuration
 
+# Local PostgreSQL (Raspberry Pi)
+LOCAL_PG_HOST     = "localhost"
+LOCAL_PG_PORT     = 5432
+LOCAL_PG_USER     = "postgres"
+LOCAL_PG_PASSWORD = "cs2monitor"
+LOCAL_PG_DB       = "cs2"
+
+# Slack
+SLACK_BOT_TOKEN   = "xoxb-..."          # from api.slack.com/apps → OAuth & Permissions
+SLACK_CHANNEL     = "C0B42G4AU0N"       # channel ID (not name)
+SLACK_BOT_USER_ID = "U0BBGRB0HC4"       # bot user ID — used to detect @mentions
+
+# Sync batch size (rows per table per cycle)
+SYNC_BATCH_SIZE = 5000
+
+# Alert thresholds: (max_value, min_value, description)
+# Set max_value=None for a lower-bound check, min_value=None for an upper-bound check
 THRESHOLDS = {
-    # sensor mapping       : (max_value, min_value, description)
     "MXC_TEMPERATURE":     (0.030,  None,  "MXC temperature > 30 mK"),
+    "MXC_TEMPERATURE_FAR": (0.050,  None,  "MXC far-end temperature > 50 mK"),
     "STILL_TEMPERATURE":   (2.0,    None,  "Still temperature > 2 K"),
     "4K_TEMPERATURE":      (6.0,    None,  "4K plate > 6 K"),
     "50K_TEMPERATURE":     (65.0,   None,  "50K plate > 65 K"),
+    "B1A_TEMPERATURE":     (1.0,    None,  "B1A stage > 1 K"),
+    "B2_TEMPERATURE":      (4.5,    None,  "B2 stage > 4.5 K"),
+    "P1_PRESSURE":         (20.0,   None,  "P1 return pressure > 20 mbar"),
     "P2_PRESSURE":         (0.5,    None,  "P2 still pressure > 0.5 mbar"),
     "P5_PRESSURE":         (1e-3,   None,  "P5 MXC pressure > 1e-3 mbar"),
     "FLOW_VALUE":          (None,   0.01,  "He flow < 0.01 mmol/s"),
-    # add / adjust to match your system's normal operating ranges
 }
 
-ALERT_COOLDOWN_MINUTES = 30   # minimum gap between repeated alerts for the same sensor
-CS2_ALERT_MIN_SEVERITY = 2    # 1 = warning, 2 = error only
+# How long before the same sensor can alert again (minutes)
+ALERT_COOLDOWN_MINUTES = 30
+
+# Minimum CS2 alert severity to forward: 1 = warning, 2 = error
+CS2_ALERT_MIN_SEVERITY = 2
 ```
 
-### First run (skip historical alerts)
+To change a threshold permanently, edit this file and restart the cron job.  
+To change it temporarily via Slack, use the `change` command (see [Slack Interaction](#slack-interaction)).
 
-Run this once before starting the cron job to record the current alert state and avoid flooding Slack with old alerts:
+---
+
+## Slack App Setup
+
+### Create the bot
+
+1. Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From scratch**
+2. Name it `BlueFors-Alert`, select your workspace
+
+### Add permissions (Bot Token Scopes)
+
+Go to **OAuth & Permissions** → **Bot Token Scopes** → **Add an OAuth Scope**:
+
+| Scope | Why it's needed |
+|---|---|
+| `chat:write` | Send alert messages |
+| `channels:history` | Read channel messages to detect `@BlueFors-Alert` commands |
+| `reactions:read` | Check if someone reacted ✅ on an alert to acknowledge it |
+
+After adding scopes, click **Reinstall to Workspace** at the top of the page.
+
+### Get the token and IDs
+
+- **Bot Token** (`xoxb-...`): shown at the top of the OAuth & Permissions page after install
+- **Channel ID**: right-click the channel in Slack → **Copy link** — the ID is the last segment (`C0B42...`)
+- **Bot User ID**: call `https://slack.com/api/auth.test` with your token — the `user_id` field
+
+Test the token:
+
+```bash
+curl -s https://slack.com/api/auth.test \
+  -H "Authorization: Bearer xoxb-YOUR-TOKEN" | python3 -m json.tool
+# "ok": true  means it works
+```
+
+### Invite the bot to your channel
+
+In Slack, open the channel and type:
+
+```
+/invite @BlueFors-Alert
+```
+
+---
+
+## Starting the System
+
+### Step 1 — Windows: copy and test the sync script
+
+```powershell
+# Copy from Pi to Windows (run on Windows)
+scp cdms@172.31.255.62:/home/cdms/bluefors_monitor/sync_push.ps1 C:\bluefors_monitor\sync_push.ps1
+
+# Test one run
+powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1
+```
+
+### Step 2 — Windows: install scheduled task (run as Administrator)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1 -Install
+```
+
+### Step 3 — Pi: initialise monitor state (run once, skips historical alerts)
 
 ```bash
 cd /home/cdms/bluefors_monitor
 python3 monitor.py --init
 ```
 
-### Install cron job
+Output:
+
+```
+Initialised: last_cs2_alert_id=1134, skipped alerts for 11 sensors
+--init complete.
+```
+
+### Step 4 — Pi: install cron job
 
 ```bash
 bash setup_cron.sh
 ```
 
-This adds a crontab entry that runs `monitor.py` every minute:
+This writes the following line to crontab:
 
 ```
 * * * * * python3 /home/cdms/bluefors_monitor/monitor.py >> /home/cdms/bluefors_monitor/monitor.log 2>&1
@@ -344,125 +625,50 @@ Verify:
 crontab -l
 ```
 
----
+### Step 5 — Verify everything is running
 
-## How monitor.py works
-
-Every minute, three checks run:
-
-### 1. Data freshness
-
-Checks `MAX(time)` in `double_value_change_events`. If the latest reading is more than 5 minutes old, a Slack alert is sent indicating the sync pipeline may have stopped.
-
-### 2. Sensor threshold violations
-
-For each sensor defined in `THRESHOLDS`, the latest value is fetched and compared against the configured limits. If a limit is exceeded and the cooldown period has passed, a Slack message is sent:
-
-```
-⚠️ MXC temperature > 30 mK
-Current value: 0.0312 K | Sensor time: 2026-06-18 14:23:01
-```
-
-### 3. CS2 system alert forwarding
-
-New rows in the `alerts` table with `severity >= CS2_ALERT_MIN_SEVERITY` are forwarded to Slack. Alerts are grouped by error code so repeated occurrences are batched into a single message.
-
-State (last seen alert ID, last alert times per sensor) is stored in `monitor_state.json`.
-
----
-
-## Troubleshooting
-
-### Sync: "Cannot connect to Raspberry Pi"
-
-- Check the Pi is reachable: `ping 172.31.255.62`  
-- Check port 5432 is open: `Test-NetConnection -ComputerName 172.31.255.62 -Port 5432`  
-- Check UFW on Pi: `sudo ufw status`  
-
-### Sync: "duplicate key value violates unique constraint"
-
-This happens if `win_sync_state.json` is lost or empty and the script tries to re-copy rows already in the Pi database. Fix:
-
-```powershell
-Remove-Item C:\bluefors_monitor\win_sync_state.json -ErrorAction SilentlyContinue
-# Re-run once — the script will re-initialise from the Pi's current max IDs
-powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1
-```
-
-### Sync: "syntax error at or near ON"
-
-PostgreSQL's `COPY` command does not support `ON CONFLICT`. The current script avoids this by initialising from the Pi's max IDs so no duplicate rows are sent. If you see this error, delete `win_sync_state.json` and re-initialise as above.
-
-### Scheduled task runs once then stops
-
-Verify the task was registered with administrator privileges:
-
-```powershell
-Get-ScheduledTask -TaskName "BlueForsSync"
-# State should be "Ready"
-```
-
-Re-install if needed (run PowerShell as Administrator):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1 -Install
-```
-
-### Monitor: Slack messages not sending
-
-Check `monitor.log`:
-
-```bash
-tail -50 /home/cdms/bluefors_monitor/monitor.log
-```
-
-Test the token manually:
-
-```bash
-curl -s https://slack.com/api/auth.test \
-  -H "Authorization: Bearer xoxb-YOUR-TOKEN"
-```
-
-The bot must be invited to the target channel: in Slack, type `/invite @BlueFors-Alert` in the channel.
-
-### Check how far behind the sync is
+Check sync is receiving data (row count should grow each minute):
 
 ```bash
 PGPASSWORD=cs2monitor psql -h localhost -U postgres -d cs2 \
-  -c "SELECT MAX(time) FROM double_value_change_events;"
+  -c "SELECT COUNT(*) FROM double_value_change_events;"
 ```
 
-Compare with the current time. Each sync cycle pushes up to 5000 rows per table, so large gaps (e.g. after the initial setup) take time to catch up.
+Check monitor log:
+
+```bash
+tail -f /home/cdms/bluefors_monitor/monitor.log
+```
 
 ---
 
-## Slack interaction
+## Slack Interaction
 
-### Acknowledging an alert
+### Acknowledge an alert (silence 10 minutes)
 
-React to any alert message with ✅ 👏 👍 🤙, or reply `ok` / `OK` in the alert thread.
-That sensor will be silenced for **10 minutes**.
+React to any alert message with **✅ 👏 👍 🤙**, or reply `ok` / `OK` in the alert thread.  
+The monitor checks for these each minute and silences that sensor for 10 minutes.
 
 ### Commands
 
-Mention `@BlueFors-Alert` followed by a command in any channel message:
+Mention `@BlueFors-Alert` in the channel followed by a command:
 
 | Command | Description |
 |---|---|
 | `help` | Show all available commands |
-| `list` | Show sensor numbers, short names, and current thresholds |
-| `status` | Show active overrides and silenced sensors |
+| `list` | Show all sensors with numbers, short names, and current thresholds |
+| `status` | Show active threshold overrides and silenced sensors |
 | `ack` | Silence ALL sensors for 10 minutes |
 | `change <sensor> to <value> for 5min` | Temporary 5-minute threshold override |
 | `change <sensor> to <value> for 10min` | Temporary 10-minute threshold override |
-| `change <sensor> to <value> for ever` | Permanent threshold change |
+| `change <sensor> to <value> for ever` | Permanent threshold change (until `reset`) |
 | `reset <sensor>` | Restore factory default threshold |
+
+The `<sensor>` field accepts a number, short name, or full mapping name interchangeably.
 
 ### Sensor identifiers
 
-The `<sensor>` field accepts a number, short name, or full mapping name:
-
-| # | Short name | Full name | Unit | Default alert |
+| # | Short name | Full mapping name | Unit | Default alert condition |
 |---|---|---|---|---|
 | 1 | MXC | MXC_TEMPERATURE | K | > 0.030 K |
 | 2 | MXCFAR | MXC_TEMPERATURE_FAR | K | > 0.050 K |
@@ -480,31 +686,197 @@ The `<sensor>` field accepts a number, short name, or full mapping name:
 
 ```
 @BlueFors-Alert list
-@BlueFors-Alert change 1 to 0.05 for 5min
-@BlueFors-Alert change MXC to 0.04 for ever
-@BlueFors-Alert reset STILL
+@BlueFors-Alert status
 @BlueFors-Alert ack
+@BlueFors-Alert change 1 to 0.05 for 5min
+@BlueFors-Alert change MXC to 0.04 for 10min
+@BlueFors-Alert change MXC_TEMPERATURE to 0.035 for ever
+@BlueFors-Alert reset STILL
+@BlueFors-Alert reset 3
 ```
 
 ---
 
-## File reference
+## Database Schema
+
+### double_value_change_events
+
+Every numerical sensor reading from the CS2 system.
+
+```sql
+id       BIGINT PRIMARY KEY
+time     TIMESTAMPTZ          -- when the value was recorded
+mapping  VARCHAR              -- sensor name, e.g. "MXC_TEMPERATURE"
+value    DOUBLE PRECISION     -- the reading
+value_id VARCHAR
+```
+
+Query latest value per sensor:
+
+```sql
+SELECT DISTINCT ON (mapping) mapping, value, time
+FROM double_value_change_events
+ORDER BY mapping, time DESC;
+```
+
+### alerts
+
+CS2 system alerts generated by the control software.
+
+```sql
+id                  BIGINT PRIMARY KEY
+code                INTEGER
+datetime            TIMESTAMPTZ
+title               VARCHAR
+description         VARCHAR
+severity            INTEGER      -- 1 = warning, 2 = error
+originator          VARCHAR
+resolution_datetime TIMESTAMPTZ
+resolved_by         VARCHAR
+```
+
+### device_states
+
+Current state snapshot of all 50 connected devices. Fully replaced every sync cycle.
+
+```sql
+datetime   TIMESTAMPTZ
+device_id  VARCHAR PRIMARY KEY
+values     JSONB                -- device-specific state fields
+```
+
+---
+
+## Sensor Mappings
+
+All sensor names found in `double_value_change_events`:
+
+| Mapping | Unit | Description |
+|---|---|---|
+| `MXC_TEMPERATURE` | K | Mixing chamber temperature |
+| `MXC_TEMPERATURE_FAR` | K | Mixing chamber far-end temperature |
+| `STILL_TEMPERATURE` | K | Still temperature |
+| `4K_TEMPERATURE` | K | 4K plate temperature |
+| `50K_TEMPERATURE` | K | 50K plate temperature |
+| `B1A_TEMPERATURE` | K | B1A stage temperature |
+| `B2_TEMPERATURE` | K | B2 stage temperature |
+| `P1_PRESSURE` | mbar | Return line pressure |
+| `P2_PRESSURE` | mbar | Still pressure |
+| `P3_PRESSURE` | mbar | Condenser pressure |
+| `P4_PRESSURE` | mbar | Pumping line pressure |
+| `P5_PRESSURE` | mbar | MXC pressure |
+| `P6_PRESSURE` | mbar | Backing pressure |
+| `P7_PRESSURE` | mbar | Foreline pressure |
+| `FLOW_VALUE` | mmol/s | Helium circulation flow rate |
+| `HELIUM_TANK_VALUE` | — | Helium tank level |
+| `MXC_HEATING_POWER` | W | MXC heater power |
+| `STILL_HEATING_POWER` | W | Still heater power |
+| `MXC_TARGET_TEMPERATURE` | K | MXC temperature setpoint |
+| `STILL_TARGET_TEMPERATURE` | K | Still temperature setpoint |
+| `COM_PUMP_POWER` | W | Compressor pump power |
+| `R1A_PUMP_POWER` | W | R1A pump power |
+| `R2_PUMP_POWER` | W | R2 pump power |
+
+---
+
+## Troubleshooting
+
+### Sync: cannot connect to Raspberry Pi
+
+```powershell
+# Test connectivity from Windows
+ping 172.31.255.62
+Test-NetConnection -ComputerName 172.31.255.62 -Port 5432
+```
+
+If port 5432 is blocked, check UFW on the Pi:
+
+```bash
+sudo ufw status
+sudo ufw allow from 172.31.255.0/16 to any port 5432
+```
+
+### Sync: duplicate key error
+
+Happens when `win_sync_state.json` is missing or empty and the script tries to re-send rows already in the Pi database. Fix:
+
+```powershell
+# Delete state file — next run re-initialises from Pi's max IDs
+Remove-Item C:\bluefors_monitor\win_sync_state.json -ErrorAction SilentlyContinue
+powershell -ExecutionPolicy Bypass -File C:\bluefors_monitor\sync_push.ps1
+```
+
+### Sync: 0 rows pushed every run
+
+The state file was initialised to the Pi's current max IDs. If the Pi is already up to date, 0 rows is correct. To check:
+
+```bash
+# On Pi: how old is the latest data?
+PGPASSWORD=cs2monitor psql -h localhost -U postgres -d cs2 \
+  -c "SELECT MAX(time) FROM double_value_change_events;"
+```
+
+### Scheduled task stops / Access Denied on install
+
+The task must be registered as Administrator. Right-click PowerShell → **Run as administrator**, then run the `-Install` command again.
+
+```powershell
+# Check task status
+Get-ScheduledTask -TaskName "BlueForsSync" | Select-Object TaskName, State, LastRunTime
+```
+
+### Monitor: Slack messages not arriving
+
+Check the log:
+
+```bash
+tail -50 /home/cdms/bluefors_monitor/monitor.log
+```
+
+Test the bot token:
+
+```bash
+curl -s https://slack.com/api/auth.test \
+  -H "Authorization: Bearer xoxb-YOUR-TOKEN" | python3 -m json.tool
+```
+
+Confirm the bot is in the channel (type `/invite @BlueFors-Alert` in Slack if not).
+
+Check required scopes are granted (`channels:history`, `reactions:read`, `chat:write`):
+
+```bash
+curl -s "https://slack.com/api/conversations.history?channel=C0B42G4AU0N&limit=1" \
+  -H "Authorization: Bearer xoxb-YOUR-TOKEN" | python3 -m json.tool
+# "ok": true confirms channels:history is granted
+```
+
+### Re-initialise monitor state (clear all cooldowns and overrides)
+
+```bash
+cd /home/cdms/bluefors_monitor
+python3 monitor.py --init
+```
+
+---
+
+## File Reference
 
 | File | Location | Description |
 |---|---|---|
 | `sync_push.ps1` | Windows `C:\bluefors_monitor\` | Pushes CS2 data to Pi every minute |
-| `win_sync_state.json` | Windows `C:\bluefors_monitor\` | Tracks last synced row ID per table |
-| `win_sync.log` | Windows `C:\bluefors_monitor\` | Sync log |
-| `config.py` | Pi `~/bluefors_monitor/` | Thresholds, credentials, settings |
-| `monitor.py` | Pi `~/bluefors_monitor/` | Alert monitor (runs via cron) |
-| `setup_cron.sh` | Pi `~/bluefors_monitor/` | Installs the cron job |
-| `monitor_state.json` | Pi `~/bluefors_monitor/` | Tracks last seen alert IDs |
-| `monitor.log` | Pi `~/bluefors_monitor/` | Monitor log |
+| `win_sync_state.json` | Windows `C:\bluefors_monitor\` | Tracks last synced row ID per table (auto-generated) |
+| `win_sync.log` | Windows `C:\bluefors_monitor\` | Sync run log (auto-generated) |
+| `config.py` | Pi `/home/cdms/bluefors_monitor/` | All credentials and threshold settings |
+| `monitor.py` | Pi `/home/cdms/bluefors_monitor/` | Alert monitor — runs via cron every minute |
+| `setup_cron.sh` | Pi `/home/cdms/bluefors_monitor/` | Installs the cron job |
+| `monitor_state.json` | Pi `/home/cdms/bluefors_monitor/` | Runtime state — alert times, acks, overrides (auto-generated) |
+| `monitor.log` | Pi `/home/cdms/bluefors_monitor/` | Monitor run log (auto-generated) |
 
 ---
 
 ## GitHub
 
-Source code: [https://github.com/ZhihengLi0/column](https://github.com/ZhihengLi0/column)
+Source: [https://github.com/ZhihengLi0/column](https://github.com/ZhihengLi0/column)
 
-> **Note:** `config.py` is excluded from the repository (contains the Slack bot token). Copy it manually to the Pi and fill in your credentials.
+> `config.py` is excluded from the repository (contains the Slack token and database password).  
+> After cloning, create it manually on the Pi using the template in the [Configuration](#configuration--configpy) section above.
