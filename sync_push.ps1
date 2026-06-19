@@ -105,8 +105,7 @@ if ($Install) {
     $trigger  = New-ScheduledTaskTrigger `
                     -Once `
                     -At (Get-Date) `
-                    -RepetitionInterval (New-TimeSpan -Minutes 1) `
-                    -RepetitionDuration ([TimeSpan]::MaxValue)
+                    -RepetitionInterval (New-TimeSpan -Minutes 1)
     $settings = New-ScheduledTaskSettingsSet `
                     -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
                     -MultipleInstances IgnoreNew
