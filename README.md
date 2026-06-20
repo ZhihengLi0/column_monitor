@@ -22,6 +22,11 @@ Data is synced every minute from the Windows CS2 PC to a Raspberry Pi, which run
 13. [Troubleshooting](#troubleshooting)
 14. [File Reference](#file-reference)
 
+**Appendix**
+- [A — CS2 System & Database Background](#appendix-a--cs2-system--database-background)
+- [B — Full Database Schema Reference](#appendix-b--full-database-schema-reference)
+- [C — Data Flow & Migration Notes](#appendix-c--data-flow--migration-notes)
+
 ---
 
 ## Architecture
@@ -880,3 +885,196 @@ Source: [https://github.com/ZhihengLi0/column](https://github.com/ZhihengLi0/col
 
 > `config.py` is excluded from the repository (contains the Slack token and database password).  
 > After cloning, create it manually on the Pi using the template in the [Configuration](#configuration--configpy) section above.
+
+---
+
+## Appendix A — CS2 System & Database Background
+
+### What is CS2?
+
+CS2 (Control System 2) is the control and monitoring system for the **BlueFors XLD dilution refrigerator** used in the SuperCDMS dark matter experiment at the University of Minnesota. A dilution refrigerator is an ultra-low-temperature device capable of cooling experimental payloads to ~10 millikelvin (−273.14 °C), widely used in quantum computing and low-temperature physics research.
+
+CS2 is responsible for:
+- Real-time acquisition of all sensor data (temperature, pressure, flow rate, heater power, etc.)
+- Control of actuators: valves, pumps, heaters
+- Logging of system alerts and automated operation records (cool-down, warm-up sequences)
+
+### Database Overview
+
+| Item | Details |
+|------|---------|
+| Database engine | PostgreSQL 14.9 (on BlueFors Windows CS2 PC) |
+| Backup size | ~2.1 GB |
+| Data time range | 2026-05-21 to 2026-06-12 (initial backup) |
+| Sensor value rows | ~12 million+ |
+| Acquisition rate | 1 sample/second per device |
+| Schema | `public` (PostgreSQL default) |
+
+The database was migrated from the CS2 Windows PC to a 12.7 TB Linux server and subsequently mirrored to a Raspberry Pi for real-time monitoring. This repository implements the Pi-side sync and alert pipeline.
+
+---
+
+## Appendix B — Full Database Schema Reference
+
+The CS2 database contains **13 core tables** across four functional groups.
+
+```
+CS2 Database (public schema)
+│
+├── [Sensor Data]
+│   ├── double_value_change_events   → float readings (temp, pressure, power, flow)
+│   ├── int_value_change_events      → integer values
+│   ├── boolean_value_change_events  → on/off states (valves, relays)
+│   ├── string_value_change_events   → string states
+│   └── json_value_change_events     → complex JSON data
+│
+├── [Device State]
+│   ├── device_states    → current state snapshot per device (overwritten each sync)
+│   └── device_events    → full historical stream of device state changes
+│
+├── [Alerts & Logs]
+│   ├── alerts           → CS2-generated errors and warnings
+│   └── user_log_entries → manually entered operator log entries
+│
+└── [Automation & Control]
+    ├── automation_events      → cool-down / warm-up procedure execution records
+    ├── automation_state       → current running automation state
+    ├── core_statemachine      → core CS2 state machine
+    └── flyway_schema_history  → database schema migration history (managed by Flyway)
+```
+
+### `double_value_change_events` — Primary Sensor Table
+
+The largest table (12 M+ rows). Every numerical sensor reading is appended here.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | bigint | Auto-increment primary key |
+| `time` | timestamptz | Acquisition timestamp |
+| `mapping` | varchar(255) | Human-readable sensor name |
+| `value` | double precision | Sensor reading |
+| `value_id` | varchar(255) | Unique device path in the CS2 system |
+
+**Key sensor mappings used by the monitor:**
+
+| mapping | Unit | Description |
+|---------|------|-------------|
+| `MXC_TEMPERATURE` | K | Mixing chamber temperature (coldest point) |
+| `MXC_TEMPERATURE_FAR` | K | Mixing chamber far-end temperature |
+| `STILL_TEMPERATURE` | K | Still temperature |
+| `4K_TEMPERATURE` | K | 4K cold plate temperature |
+| `50K_TEMPERATURE` | K | 50K cold plate temperature |
+| `B1A_TEMPERATURE` | K | B1A stage temperature |
+| `B2_TEMPERATURE` | K | B2 stage temperature |
+| `P1_PRESSURE`–`P7_PRESSURE` | mbar | Pressure sensors P1 through P7 |
+| `FLOW_VALUE` | mmol/s | Helium circulation flow rate |
+| `MXC_HEATING_POWER` | W | MXC heater power |
+| `STILL_HEATING_POWER` | W | Still heater power |
+| `COM_PUMP_POWER` | W | Compressor pump power |
+
+Query latest value per sensor:
+
+```sql
+SELECT DISTINCT ON (mapping) mapping, value, time
+FROM double_value_change_events
+ORDER BY mapping, time DESC;
+```
+
+### `boolean_value_change_events` — Valve & Relay States
+
+Records every open/close event for valves (V001–V503H), pumps, and relays.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | bigint | Primary key |
+| `time` | timestamptz | Time of state change |
+| `mapping` | varchar | Device name |
+| `value` | boolean | `true` = open/on, `false` = closed/off |
+| `value_id` | varchar | CS2 device path |
+
+### `device_states` — Real-Time Device Snapshot
+
+Stores the complete current state of all ~50 connected devices as JSONB. **Fully replaced** on every sync cycle (no `id` column — see sync script).
+
+**Device inventory:**
+
+| Type | Count | Examples |
+|------|-------|---------|
+| Valve-basic | 24 | V104, V113, V203, V403, V503H, … |
+| Pfeiffer gauges | 7 | RPT200 ×4, CPT200 ×2, MPT200 ×1 |
+| Pumps | 4 | Turbopump, Kashiyama NeoDry, Agilent IDP7/IDP3 |
+| Cryomech compressor | 1 | Pulse tube compressor |
+| Temperature controllers | 2 | BlueFors TC, LakeShore controller |
+| Flow controller | 1 | Bronkhorst EL-Flow |
+| System modules | 5 | PLCAlarms, PLCRemote, GHSdiagnostics, CSState, CoreUnitLed |
+
+### `alerts` — CS2 Alert Log
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | bigint | Primary key |
+| `code` | integer | Alert code |
+| `datetime` | timestamptz | Time raised |
+| `title` / `description` | varchar | Alert content |
+| `severity` | integer | 1 = warning, 2 = error |
+| `resolution_datetime` | timestamptz | Resolved time (null if open) |
+| `resolved_by` | varchar | Operator who resolved |
+
+This table is the source for the `check_cs2_alerts()` function in `monitor.py`, which forwards `severity ≥ 2` alerts to Slack.
+
+### `automation_events` — Procedure Execution Log
+
+Records every automated cool-down, warm-up, and condensation procedure run by CS2, including step-by-step state and elapsed time. Useful for correlating sensor anomalies with specific automation phases.
+
+### `user_log_entries` — Operator Log
+
+Manually written notes by lab personnel during operations, stored with author and timestamp. Max 2048 characters per entry.
+
+---
+
+## Appendix C — Data Flow & Migration Notes
+
+### Full Data Flow
+
+```
+[BlueFors Sensors & Actuators]
+        │  sampled every second
+        ▼
+[CS2 Control PC — Windows, 172.31.255.10]
+  PostgreSQL 14.9 on port 5434
+        │
+        │  sync_push.ps1 — Windows Scheduled Task, every 1 min
+        │  pushes new rows via \copy CSV over TCP port 5432
+        ▼
+[Raspberry Pi — 172.31.255.62]
+  PostgreSQL 17 on port 5432
+  data stored on 12.7 TB external drive
+        │
+        │  monitor.py — cron job, every 1 min
+        ▼
+[Slack #bluefors-alerts channel]
+  threshold alerts + CS2 error forwarding
+  interactive command interface (@BlueFors-Alert)
+```
+
+### Why Windows Pushes to Pi (not the reverse)
+
+The CS2 Windows PC has no open inbound TCP port — the Pi cannot initiate a connection to it. Instead, the Windows Task Scheduler runs `sync_push.ps1` every minute, which opens an outbound connection to the Pi on port 5432 and pushes new rows via `psql \copy`.
+
+### Initial Database Migration
+
+The CS2 database (~2.1 GB, 12 M+ rows across 13 tables) was exported from the Windows CS2 PC using `pg_dump` and restored on the Pi:
+
+```bash
+# Export (Windows)
+pg_dump -h localhost -p 5434 -U postgres -d cs2 -F c -f cs2_backup.dump
+
+# Restore (Pi)
+pg_restore -h localhost -U postgres -d cs2 -v cs2_backup.dump
+```
+
+The sync script initialises from the Pi's current `MAX(id)` per table on first run, so no historical rows are re-sent after the initial restore.
+
+### Storage
+
+The database is stored on a mounted external hard drive (`/mnt/harddrive/cs2_database/`) rather than the Pi's SD card, configured via `data_directory` in `postgresql.conf`. This avoids SD card wear and accommodates the growing dataset (1 sample/second × 50+ channels ≈ ~150 MB/day uncompressed).
