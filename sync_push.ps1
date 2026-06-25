@@ -4,7 +4,7 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File sync_push.ps1           # run once
-#   powershell -ExecutionPolicy Bypass -File sync_push.ps1 -Install  # register scheduled task
+#   powershell -ExecutionPolicy Bypass -File sync_push.ps1 -Install  # register scheduled task (every minute)
 
 param([switch]$Install)
 
@@ -21,10 +21,9 @@ $RemoteUser = "postgres"
 $RemotePass = "cs2monitor"
 $RemoteDB   = "cs2"
 
-$StateFile    = Join-Path $PSScriptRoot "win_sync_state.json"
-$LogFile      = Join-Path $PSScriptRoot "win_sync.log"
-$BatchSize    = 20000   # rows per table per cycle
-$SyncInterval = 10      # seconds between sync cycles
+$StateFile = Join-Path $PSScriptRoot "win_sync_state.json"
+$LogFile   = Join-Path $PSScriptRoot "win_sync.log"
+$BatchSize = 5000
 
 $tables = @(
     "double_value_change_events",
@@ -81,6 +80,8 @@ function SaveState($state) {
 }
 
 function InitStateFromRemote() {
+    # On first run: start from the Raspberry Pi's current max IDs
+    # This skips re-syncing the backup data already on the Pi
     Log "First run - initialising sync position from Raspberry Pi..."
     $state = @{}
     foreach ($tbl in $tables) {
@@ -94,80 +95,6 @@ function InitStateFromRemote() {
     return $state
 }
 
-function SyncOnce() {
-    # Test remote connection
-    $test = RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "SELECT 1"
-    if ($LASTEXITCODE -ne 0) {
-        Log "ERROR: Cannot connect to Raspberry Pi $RemoteHost"
-        return
-    }
-
-    # Test local CS2 connection
-    $env:PGPASSWORD = $LocalPass
-    $localTest = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB -t -A `
-        -c "SELECT COUNT(*) FROM double_value_change_events;" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Log "ERROR: Cannot connect to local CS2 database - $localTest"
-        return
-    }
-
-    # Load or initialise state
-    $state = LoadState
-    if ($null -eq $state -or $state.Count -eq 0) {
-        $state = InitStateFromRemote
-        SaveState $state
-    }
-
-    $total = 0
-
-    foreach ($tbl in $tables) {
-        $lastId = 0
-        if ($state.ContainsKey($tbl)) { $lastId = $state[$tbl].last_id }
-
-        $env:PGPASSWORD = $LocalPass
-        $copyOut = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
-            -c "\copy (SELECT * FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) TO stdout WITH CSV" `
-            2>$null
-
-        $lines = @($copyOut | Where-Object { $_ -and $_ -ne "" })
-        if ($lines.Count -eq 0) { continue }
-
-        $env:PGPASSWORD = $RemotePass
-        $importErr = $lines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
-            -c "\copy public.$tbl FROM stdin WITH CSV" 2>&1
-
-        if ($LASTEXITCODE -eq 0) {
-            $newId = RunPsql $LocalHost $LocalPort $LocalUser $LocalPass $LocalDB `
-                "SELECT id FROM (SELECT id FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) t ORDER BY id DESC LIMIT 1"
-            $newId = ($newId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
-            if ($newId) {
-                $state[$tbl] = @{ last_id = [int]$newId }
-                $total += $lines.Count
-                Log "  $tbl : +$($lines.Count) rows (last id: $newId)"
-            }
-        } else {
-            Log "  $tbl : import failed - $importErr"
-        }
-    }
-
-    # device_states: full refresh (no id column)
-    $env:PGPASSWORD = $LocalPass
-    $dsData = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
-        -c "\copy (SELECT * FROM public.device_states) TO stdout WITH CSV" 2>$null
-    $dsLines = @($dsData | Where-Object { $_ -and $_ -ne "" })
-    if ($dsLines.Count -gt 0) {
-        $env:PGPASSWORD = $RemotePass
-        RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "TRUNCATE public.device_states" | Out-Null
-        $dsLines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
-            -c "\copy public.device_states FROM stdin WITH CSV" 2>$null | Out-Null
-    }
-
-    SaveState $state
-    if ($total -gt 0) {
-        Log "=== Sync done: +$total rows ==="
-    }
-}
-
 # --- Install as scheduled task ---
 if ($Install) {
     $script   = $PSCommandPath
@@ -179,20 +106,92 @@ if ($Install) {
                     -Once `
                     -At (Get-Date) `
                     -RepetitionInterval (New-TimeSpan -Minutes 1)
-    # No execution time limit — script runs as a continuous loop
     $settings = New-ScheduledTaskSettingsSet `
-                    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+                    -ExecutionTimeLimit (New-TimeSpan -Minutes 1) `
                     -MultipleInstances IgnoreNew
     Unregister-ScheduledTask -TaskName "BlueForsSync" -Confirm:$false -ErrorAction SilentlyContinue
     Register-ScheduledTask -TaskName "BlueForsSync" `
         -Action $action -Trigger $trigger -Settings $settings -RunLevel Highest -Force
-    Write-Host "Scheduled task 'BlueForsSync' installed - syncs every $SyncInterval seconds." -ForegroundColor Green
+    Write-Host "Scheduled task 'BlueForsSync' installed - runs every minute." -ForegroundColor Green
     exit 0
 }
 
-# --- Main: continuous sync loop ---
-Log "=== BlueFors sync started (every $SyncInterval seconds, batch $BatchSize rows) ==="
-while ($true) {
-    SyncOnce
-    Start-Sleep -Seconds $SyncInterval
+# --- Main sync ---
+Log "=== Sync started ==="
+
+# Test remote connection
+$test = RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "SELECT 1"
+if ($LASTEXITCODE -ne 0) {
+    Log "ERROR: Cannot connect to Raspberry Pi $RemoteHost"
+    exit 1
 }
+Log "Connected to Raspberry Pi OK"
+
+# Test local CS2 connection
+$env:PGPASSWORD = $LocalPass
+$localTest = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB -t -A `
+    -c "SELECT COUNT(*) FROM double_value_change_events;" 2>&1
+if ($LASTEXITCODE -ne 0) {
+    Log "ERROR: Cannot connect to local CS2 database - $localTest"
+    exit 1
+}
+Log "Local CS2 database OK - $localTest rows in double_value_change_events"
+
+# Load or initialise state
+# If state file missing OR empty (no tables tracked yet), init from Raspberry Pi
+$state = LoadState
+if ($null -eq $state -or $state.Count -eq 0) {
+    $state = InitStateFromRemote
+    SaveState $state
+}
+
+$total = 0
+
+foreach ($tbl in $tables) {
+    $lastId = 0
+    if ($state.ContainsKey($tbl)) { $lastId = $state[$tbl].last_id }
+
+    # Export new rows from local CS2
+    $env:PGPASSWORD = $LocalPass
+    $copyOut = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
+        -c "\copy (SELECT * FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) TO stdout WITH CSV" `
+        2>$null
+
+    $lines = @($copyOut | Where-Object { $_ -and $_ -ne "" })
+    if ($lines.Count -eq 0) { continue }
+
+    # Import to Raspberry Pi (no ON CONFLICT needed - we only send new rows)
+    $env:PGPASSWORD = $RemotePass
+    $importErr = $lines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
+        -c "\copy public.$tbl FROM stdin WITH CSV" 2>&1
+
+    if ($LASTEXITCODE -eq 0) {
+        $newId = RunPsql $LocalHost $LocalPort $LocalUser $LocalPass $LocalDB `
+            "SELECT id FROM (SELECT id FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) t ORDER BY id DESC LIMIT 1"
+        $newId = ($newId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
+        if ($newId) {
+            $state[$tbl] = @{ last_id = [int]$newId }
+            $total += $lines.Count
+            Log "  $tbl : +$($lines.Count) rows (last id: $newId)"
+        }
+    } else {
+        Log "  $tbl : import failed - $importErr"
+    }
+}
+
+# device_states: full refresh (no id column)
+$env:PGPASSWORD = $LocalPass
+$dsData = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
+    -c "\copy (SELECT * FROM public.device_states) TO stdout WITH CSV" 2>$null
+$dsLines = @($dsData | Where-Object { $_ -and $_ -ne "" })
+if ($dsLines.Count -gt 0) {
+    $env:PGPASSWORD = $RemotePass
+    # Clear and re-import device states
+    RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "TRUNCATE public.device_states" | Out-Null
+    $dsLines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
+        -c "\copy public.device_states FROM stdin WITH CSV" 2>$null | Out-Null
+    Log "  device_states: updated $($dsLines.Count) devices"
+}
+
+SaveState $state
+Log "=== Sync done: +$total rows total ==="
