@@ -356,6 +356,10 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         _cmd_pressure(reply_ts, conn)
         return
 
+    if re.fullmatch(r"pump\s+status", lower):
+        _cmd_pump_status(reply_ts, conn)
+        return
+
     if lower == "list":
         _cmd_list(state, reply_ts)
         return
@@ -466,6 +470,87 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         thread_ts=reply_ts)
 
 
+def _cmd_pump_status(reply_ts: str, conn=None):
+    if conn is None:
+        send_slack("Cannot read pump status: no database connection.", thread_ts=reply_ts)
+        return
+
+    def latest_bool(mapping):
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM public.boolean_value_change_events "
+                        "WHERE mapping = %s ORDER BY time DESC LIMIT 1", (mapping,))
+            r = cur.fetchone()
+            return bool(r[0]) if r else None
+
+    def latest_double(mapping):
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM public.double_value_change_events "
+                        "WHERE mapping = %s ORDER BY time DESC LIMIT 1", (mapping,))
+            r = cur.fetchone()
+            return float(r[0]) if r else None
+
+    def latest_int(mapping):
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM public.int_value_change_events "
+                        "WHERE mapping = %s ORDER BY time DESC LIMIT 1", (mapping,))
+            r = cur.fetchone()
+            return int(r[0]) if r else None
+
+    def status_icon(enabled, error):
+        if error:
+            return ":warning:"
+        if enabled:
+            return ":large_green_circle:"
+        return ":white_circle:"
+
+    lines = [":gear: *Pump Status*\n"]
+
+    # Turbopumps: B1A, B2 — have speed%, power%, temperature
+    for name in ("B1A", "B2"):
+        enabled = latest_bool(f"{name}_ENABLED")
+        error   = latest_bool(f"{name}_ERROR_VALUE")
+        temp    = latest_double(f"{name}_TEMPERATURE")
+        power   = latest_int(f"{name}_POWER")
+        speed   = latest_int(f"{name}_SPEED")
+        icon    = status_icon(enabled, error)
+        state   = "ON" if enabled else "OFF"
+        err_str = "  :warning: ERROR" if error else ""
+        details = []
+        if speed  is not None: details.append(f"speed {speed}%")
+        if power  is not None: details.append(f"power {power}%")
+        if temp   is not None: details.append(f"temp {temp:.1f} K")
+        detail_str = "  |  " + ",  ".join(details) if details else ""
+        lines.append(f"{icon} *{name}* (turbo): *{state}*{err_str}{detail_str}")
+
+    lines.append("")
+
+    # Scroll pumps: R1A, R2 — have power in W
+    for name in ("R1A", "R2"):
+        enabled = latest_bool(f"{name}_ENABLED")
+        error   = latest_bool(f"{name}_ERROR_VALUE")
+        power   = latest_double(f"{name}_PUMP_POWER")
+        icon    = status_icon(enabled, error)
+        state   = "ON" if enabled else "OFF"
+        err_str = "  :warning: ERROR" if error else ""
+        pw_str  = f"  |  power {power:.2f} W" if power is not None else ""
+        lines.append(f"{icon} *{name}* (scroll): *{state}*{err_str}{pw_str}")
+
+    lines.append("")
+
+    # Compressor: COM
+    enabled = latest_bool("COM_ENABLED")
+    error   = latest_bool("COM_ERROR_VALUE")
+    power   = latest_double("COM_PUMP_POWER")
+    icon    = status_icon(enabled, error)
+    state   = "ON" if enabled else "OFF"
+    err_str = "  :warning: ERROR" if error else ""
+    pw_str  = f"  |  power {power:.2f} W" if power is not None else ""
+    lines.append(f"{icon} *COM* (compressor): *{state}*{err_str}{pw_str}")
+
+    send_slack("\n".join(lines), color="#0066cc", thread_ts=reply_ts)
+    log.info("Sent pump status reply to Slack")
+
+
 def _fmt_pressure(val_bar: float) -> str:
     mbar = val_bar * 1000
     if mbar >= 0.1:
@@ -515,6 +600,7 @@ def _cmd_help(reply_ts=None):
         "*@mention commands* (`@BlueFors-Alert <command>`):\n"
         "`help` — show this message\n"
         "`pressure reading` — show latest P1–P7 pressure values\n"
+        "`pump status` — show on/off, power, speed for all 5 pumps (B1A, B2, R1A, R2, COM)\n"
         "`mode` — show current operating mode and what is being monitored\n"
         "`set mode auto` — automatic mode detection (based on 50K temperature)\n"
         "`set mode idle` — force IDLE mode (room temperature monitoring)\n"
