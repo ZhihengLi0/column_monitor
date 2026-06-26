@@ -119,6 +119,9 @@ def _empty_state() -> dict:
     return {
         "last_alert_time": {},
         "last_cs2_alert_id": 0,
+        "last_r1a_event_id": 0,
+        "last_r1a_power_id": 0,
+        "last_r1a_power_value": None,
         "acked_sensors": {},
         "pending_alert_msgs": {},
         "threshold_overrides": {},
@@ -627,6 +630,65 @@ def check_cs2_alerts(conn, state: dict) -> list:
     return msgs
 
 
+def check_r1a_status(conn, state: dict) -> list:
+    msgs = []
+
+    # Boolean status changes (enabled / error)
+    last_id = state.get("last_r1a_event_id", 0)
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            "SELECT id, mapping, value, time FROM public.boolean_value_change_events "
+            "WHERE mapping IN ('R1A_ENABLED', 'R1A_ERROR_VALUE') AND id > %s "
+            "ORDER BY id",
+            (last_id,))
+        bool_rows = cur.fetchall()
+
+    if bool_rows:
+        state["last_r1a_event_id"] = max(r["id"] for r in bool_rows)
+        for row in bool_rows:
+            if row["mapping"] == "R1A_ENABLED":
+                status = ":large_green_circle: *ON*" if row["value"] else ":red_circle: *OFF*"
+                msg = f":gear: *R1A Pump enabled changed* → {status}\nTime: {row['time']}"
+            else:
+                status = ":red_circle: *ERROR*" if row["value"] else ":white_check_mark: *Cleared*"
+                msg = f":warning: *R1A Pump error changed* → {status}\nTime: {row['time']}"
+            msgs.append(msg)
+            log.info(f"R1A status change: {row['mapping']} = {row['value']}")
+
+    # Pump power: alert when crossing zero (pump stopped / restarted)
+    last_power_id    = state.get("last_r1a_power_id", 0)
+    last_power_value = state.get("last_r1a_power_value")
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            "SELECT id, value, time FROM public.double_value_change_events "
+            "WHERE mapping = 'R1A_PUMP_POWER' AND id > %s ORDER BY id",
+            (last_power_id,))
+        power_rows = cur.fetchall()
+
+    if power_rows:
+        state["last_r1a_power_id"] = max(r["id"] for r in power_rows)
+        latest_power = float(power_rows[-1]["value"])
+        latest_time  = power_rows[-1]["time"]
+        prev = last_power_value
+
+        was_running = prev is not None and prev > 0.1
+        now_running = latest_power > 0.1
+
+        if prev is not None and was_running != now_running:
+            if now_running:
+                msg = (f":large_green_circle: *R1A Pump power ON* → {latest_power:.1f} W\n"
+                       f"Time: {latest_time}")
+            else:
+                msg = (f":red_circle: *R1A Pump power OFF* → {latest_power:.1f} W\n"
+                       f"Time: {latest_time}")
+            msgs.append(msg)
+            log.info(f"R1A pump power transition: {prev:.1f}W → {latest_power:.1f}W")
+
+        state["last_r1a_power_value"] = latest_power
+
+    return msgs
+
+
 def check_data_freshness(conn, state: dict):
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(time) FROM public.double_value_change_events")
@@ -653,12 +715,23 @@ def init_state(conn) -> dict:
         cur.execute("SELECT MAX(id) FROM public.alerts WHERE severity >= %s",
                     (config.CS2_ALERT_MIN_SEVERITY,))
         state["last_cs2_alert_id"] = cur.fetchone()[0] or 0
+        cur.execute("SELECT MAX(id) FROM public.boolean_value_change_events "
+                    "WHERE mapping IN ('R1A_ENABLED', 'R1A_ERROR_VALUE')")
+        state["last_r1a_event_id"] = cur.fetchone()[0] or 0
+        cur.execute("SELECT id, value FROM public.double_value_change_events "
+                    "WHERE mapping = 'R1A_PUMP_POWER' ORDER BY id DESC LIMIT 1")
+        row = cur.fetchone()
+        if row:
+            state["last_r1a_power_id"]    = row[0]
+            state["last_r1a_power_value"] = float(row[1])
     now = datetime.now()
     for mapping in {**config.THRESHOLDS_COLD, **config.THRESHOLDS_IDLE}:
         state["last_alert_time"][mapping] = now.isoformat()
-    state["last_slack_ts"]       = str(time.time())
+    state["last_slack_ts"]        = str(time.time())
     state["last_freshness_alert"] = now.isoformat()
     log.info(f"Initialised: last_cs2_alert_id={state['last_cs2_alert_id']}, "
+             f"last_r1a_event_id={state['last_r1a_event_id']}, "
+             f"last_r1a_power={state['last_r1a_power_value']:.1f}W, "
              f"skipped historical alerts")
     return state
 
@@ -699,6 +772,9 @@ def run():
         all_alerts.extend(check_sensor_thresholds(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
+            all_alerts.append((None, msg))
+
+        for msg in check_r1a_status(conn, state):
             all_alerts.append((None, msg))
 
     finally:
