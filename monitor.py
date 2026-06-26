@@ -30,9 +30,14 @@ import sys
 import time
 import json
 import logging
+import tempfile
 import requests
 import psycopg2
 import psycopg2.extras
+import matplotlib
+matplotlib.use("Agg")   # non-interactive backend (no display needed)
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -201,6 +206,54 @@ def send_slack(text: str, color: str = "danger", thread_ts: str = None) -> str |
         log.error(f"Slack send failed: {e}")
     return None
 
+def slack_upload_image(img_path: str, title: str, thread_ts: str = None) -> bool:
+    """Upload an image file to Slack using the two-step upload API."""
+    path = Path(img_path)
+    size = path.stat().st_size
+    try:
+        # Step 1: get upload URL
+        r1 = requests.post(
+            "https://slack.com/api/files.getUploadURLExternal",
+            headers=_headers(),
+            data={"filename": path.name, "length": size},
+            timeout=10)
+        resp1 = r1.json()
+        if not resp1.get("ok"):
+            log.error(f"Slack upload URL error: {resp1.get('error')}")
+            return False
+
+        upload_url = resp1["upload_url"]
+        file_id    = resp1["file_id"]
+
+        # Step 2: upload the file bytes
+        with open(img_path, "rb") as f:
+            r2 = requests.post(upload_url, data=f.read(), timeout=30)
+        if r2.status_code != 200:
+            log.error(f"Slack upload failed: {r2.status_code}")
+            return False
+
+        # Step 3: complete the upload and share to channel
+        payload = {
+            "files": [{"id": file_id, "title": title}],
+            "channel_id": config.SLACK_CHANNEL,
+        }
+        if thread_ts:
+            payload["thread_ts"] = thread_ts
+        r3 = requests.post(
+            "https://slack.com/api/files.completeUploadExternal",
+            headers=_headers(),
+            json=payload,
+            timeout=10)
+        resp3 = r3.json()
+        if not resp3.get("ok"):
+            log.error(f"Slack complete upload error: {resp3.get('error')}")
+            return False
+        return True
+    except Exception as e:
+        log.error(f"Slack image upload failed: {e}")
+        return False
+
+
 # ── Mode detection ────────────────────────────────────────────────────────────
 
 def detect_mode(conn) -> str:
@@ -366,6 +419,12 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         _cmd_heater_status(reply_ts, conn)
         return
 
+    m = re.fullmatch(r"plot\s+(\S+)(?:\s+(\d+)\s*min)?", lower)
+    if m:
+        minutes = int(m.group(2)) if m.group(2) else 30
+        _cmd_plot(m.group(1), reply_ts, conn, minutes=minutes)
+        return
+
     m = re.fullmatch(r"sentinel\s+(on|off)", lower)
     if m:
         enabled = m.group(1) == "on"
@@ -487,6 +546,97 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         f"I didn't understand: `{text}`\n"
         "Type `@BlueFors-Alert help` to see all commands.",
         thread_ts=reply_ts)
+
+
+PLOT_SENSORS = {
+    "P1": ("P1_PRESSURE", "P1 Pressure", "bar"),
+    "P2": ("P2_PRESSURE", "P2 Pressure", "bar"),
+    "P3": ("P3_PRESSURE", "P3 Pressure", "bar"),
+    "P4": ("P4_PRESSURE", "P4 Pressure", "bar"),
+    "P5": ("P5_PRESSURE", "P5 Pressure", "bar"),
+    "P6": ("P6_PRESSURE", "P6 Pressure", "bar"),
+    "P7": ("P7_PRESSURE", "P7 Pressure", "bar"),
+    "MXC":     ("MXC_TEMPERATURE",     "MXC Temperature",      "K"),
+    "STILL":   ("STILL_TEMPERATURE",   "Still Temperature",    "K"),
+    "4K":      ("4K_TEMPERATURE",      "4K Plate Temperature", "K"),
+    "50K":     ("50K_TEMPERATURE",     "50K Plate Temperature","K"),
+    "B1A":     ("B1A_TEMPERATURE",     "B1A Temperature",      "K"),
+    "B2":      ("B2_TEMPERATURE",      "B2 Temperature",       "K"),
+    "FLOW":    ("FLOW_VALUE",          "He Flow",              "mmol/s"),
+}
+
+PRESSURE_MAPPINGS_SET = {"P1_PRESSURE","P2_PRESSURE","P3_PRESSURE",
+                          "P4_PRESSURE","P5_PRESSURE","P6_PRESSURE","P7_PRESSURE"}
+
+
+def _cmd_plot(sensor_key: str, reply_ts: str, conn=None, minutes: int = 30):
+    if conn is None:
+        send_slack("Cannot plot: no database connection.", thread_ts=reply_ts)
+        return
+
+    key = sensor_key.upper()
+    if key not in PLOT_SENSORS:
+        opts = ", ".join(PLOT_SENSORS.keys())
+        send_slack(f"Unknown sensor `{sensor_key}`. Available: {opts}", thread_ts=reply_ts)
+        return
+
+    mapping, label, unit = PLOT_SENSORS[key]
+    since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT time, value FROM public.double_value_change_events "
+            "WHERE mapping = %s AND time >= %s ORDER BY time",
+            (mapping, since))
+        rows = cur.fetchall()
+
+    if not rows:
+        send_slack(f"No data for *{label}* in the last {minutes} minutes.", thread_ts=reply_ts)
+        return
+
+    times  = [r[0] for r in rows]
+    values = [float(r[1]) for r in rows]
+
+    # Convert pressure bar → mbar for display
+    is_pressure = mapping in PRESSURE_MAPPINGS_SET
+    if is_pressure:
+        values = [v * 1000 for v in values]
+        unit   = "mbar"
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(times, values, linewidth=1.2, color="#1f77b4")
+    ax.set_title(f"{label}  —  last {minutes} min  ({len(rows)} points)", fontsize=13)
+    ax.set_xlabel("Time (CDT)")
+    ax.set_ylabel(unit)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    fig.autofmt_xdate(rotation=30)
+    ax.grid(True, linestyle="--", alpha=0.5)
+
+    # Use scientific notation for very small pressure values
+    if is_pressure and max(values) < 0.1:
+        ax.yaxis.set_major_formatter(plt.ScalarFormatter(useMathText=True))
+        ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+
+    plt.tight_layout()
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False,
+                                    dir="/home/cdms/.claude/jobs/b7b666c4/tmp") as f:
+        tmp_path = f.name
+    fig.savefig(tmp_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+    title = f"{label} — last {minutes} min"
+    ok = slack_upload_image(tmp_path, title, thread_ts=reply_ts)
+    Path(tmp_path).unlink(missing_ok=True)
+
+    if ok:
+        log.info(f"Sent plot for {mapping} ({len(rows)} points) to Slack")
+    else:
+        send_slack(
+            f"Could not upload plot — bot may need `files:write` scope.\n"
+            f"Go to api.slack.com/apps → OAuth & Permissions → add `files:write` → Reinstall.",
+            thread_ts=reply_ts)
 
 
 def _cmd_pump_status(reply_ts: str, conn=None):
@@ -630,6 +780,8 @@ def _cmd_help(reply_ts=None):
         "`pressure reading` — show latest P1–P7 pressure values\n"
         "`pump status` — show on/off, power, speed for all 5 pumps (B1A, B2, R1A, R2, COM)\n"
         "`heater status` — show on/off and power for Still/MXC heat switches and heaters\n"
+        "`plot <sensor>` — plot last 30 min of data as image (e.g. `plot P1`, `plot MXC`)\n"
+        "`plot <sensor> <N>min` — plot last N minutes (e.g. `plot P5 60min`)\n"
         "`mode` — show current operating mode and what is being monitored\n"
         "`set mode auto` — automatic mode detection (based on 50K temperature)\n"
         "`set mode idle` — force IDLE mode (room temperature monitoring)\n"
