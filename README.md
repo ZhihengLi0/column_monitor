@@ -1076,6 +1076,34 @@ Source: [https://github.com/ZhihengLi0/column](https://github.com/ZhihengLi0/col
 
 ---
 
+## Version History
+
+Each version is tagged in the git repository. Use `git checkout <tag>` to inspect the code at any point.
+
+### v1.x — Single-mode monitor (fridge assumed always cold)
+
+| Version | Tag | Description |
+|---------|-----|-------------|
+| 1.0.0 | [v1.0.0](https://github.com/ZhihengLi0/column/releases/tag/v1.0.0) | Initial release — `sync_push.ps1` pushes Windows CS2 data to Pi every minute; `monitor.py` alerts on COLD sensor thresholds via Slack |
+| 1.1.0 | [v1.1.0](https://github.com/ZhihengLi0/column/releases/tag/v1.1.0) | Sync stabilization — fixed PostgreSQL port (5434), Windows Scheduled Task repeat bug, sparse ID query bug, state init from Pi max IDs |
+| 1.2.0 | [v1.2.0](https://github.com/ZhihengLi0/column/releases/tag/v1.2.0) | Interactive Slack — emoji reactions to acknowledge alerts, `ack`, `change <sensor>`, `reset <sensor>` commands |
+| 1.3.0 | [v1.3.0](https://github.com/ZhihengLi0/column/releases/tag/v1.3.0) | Full documentation — comprehensive README with architecture, setup guide, database schema reference, troubleshooting |
+
+### v2.x — Dual-mode monitor (IDLE + COLD operating modes)
+
+| Version | Tag | Description |
+|---------|-----|-------------|
+| 2.0.0 | [v2.0.0](https://github.com/ZhihengLi0/column/releases/tag/v2.0.0) | **Dual-mode system** — IDLE (room temperature, pressure checks only), TRANSITIONING (alerts suppressed), COLD (full monitoring). Auto-detected from 50K plate temperature. Slack mode commands added |
+| 2.1.0 | [v2.1.0](https://github.com/ZhihengLi0/column/releases/tag/v2.1.0) | Bug fixes — `set mode` not clearing acked sensors, `reset` showing wrong default, duplicate log entries, Windows Scheduled Task failing silently (fixed with `schtasks /ru SYSTEM`) |
+| 2.2.0 | [v2.2.0](https://github.com/ZhihengLi0/column/releases/tag/v2.2.0) | Data catch-up — batch size tooling for recovering 1.8M+ rows after sync outage; restored to 5000 rows/min for normal operation |
+| 2.3.0 | [v2.3.0](https://github.com/ZhihengLi0/column/releases/tag/v2.3.0) | Reliability — fixed silent monitor crash-loop caused by empty state file (process killed mid-write); atomic state file writes using `.tmp` rename |
+| 2.4.0 | [v2.4.0](https://github.com/ZhihengLi0/column/releases/tag/v2.4.0) | Pressure reading command — `@BlueFors-Alert pressure reading` returns P1–P7 instantly; fixed Slack API timestamp precision bug (commands silently dropped); pressure units corrected (database stores bar, display converts to mbar/μbar) |
+| 2.5.0 | [v2.5.0](https://github.com/ZhihengLi0/column/releases/tag/v2.5.0) | Fast responder — `slack_responder.py` polls Slack every 5 seconds for instant command replies (down from up to 1 minute); `sentinel on/off` command to pause/resume CS2 alert forwarding |
+| 2.6.0 | [v2.6.0](https://github.com/ZhihengLi0/column/releases/tag/v2.6.0) | Status commands and device alerts — `pump status` (B1A, B2, R1A, R2, COM), `heater status` (Still/MXC switches and heaters); automatic Slack alerts on R1A pump, heater, and Pulse Tube state changes |
+| 2.7.0 | [v2.7.0](https://github.com/ZhihengLi0/column/releases/tag/v2.7.0) | Cold cathode monitoring — P1 (Pfeiffer MPT200) on/off shown in `pressure reading`; alert if cold cathode is ON during IDLE mode or OFF during COLD mode |
+
+---
+
 ## Appendix A — CS2 System & Database Background
 
 ### What is CS2?
