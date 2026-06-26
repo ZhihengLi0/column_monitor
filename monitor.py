@@ -765,7 +765,7 @@ def init_state(conn) -> dict:
     now = datetime.now()
     for mapping in {**config.THRESHOLDS_COLD, **config.THRESHOLDS_IDLE}:
         state["last_alert_time"][mapping] = now.isoformat()
-    state["last_slack_ts"]        = str(time.time())
+    state["last_slack_ts"]        = f"{time.time():.6f}"
     state["last_freshness_alert"] = now.isoformat()
     log.info(f"Initialised: last_cs2_alert_id={state['last_cs2_alert_id']}, "
              f"last_r1a_event_id={state['last_r1a_event_id']}, "
