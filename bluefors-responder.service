@@ -1,0 +1,14 @@
+[Unit]
+Description=BlueFors Slack Command Responder
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=cdms
+WorkingDirectory=/home/cdms/bluefors_monitor
+ExecStart=/usr/bin/python3 /home/cdms/bluefors_monitor/slack_responder.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

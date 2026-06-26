@@ -131,6 +131,7 @@ def _empty_state() -> dict:
         "current_mode": None,       # IDLE / TRANSITIONING / COLD
         "mode_override": None,      # if manually set via Slack
         "mode_since": None,
+        "cs2_alerts_enabled": True, # can be toggled via 'sentinel on/off'
     }
 
 
@@ -358,6 +359,19 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
 
     if re.fullmatch(r"pump\s+status", lower):
         _cmd_pump_status(reply_ts, conn)
+        return
+
+    m = re.fullmatch(r"sentinel\s+(on|off)", lower)
+    if m:
+        enabled = m.group(1) == "on"
+        state["cs2_alerts_enabled"] = enabled
+        if enabled:
+            send_slack(":large_green_circle: *Sentinel alerts ON* — CS2 alerts will be forwarded to Slack.",
+                       color="good", thread_ts=reply_ts)
+        else:
+            send_slack(":white_circle: *Sentinel alerts OFF* — CS2 alerts paused until `sentinel on`.",
+                       color="warning", thread_ts=reply_ts)
+        log.info(f"CS2 sentinel alerts {'enabled' if enabled else 'disabled'} via Slack")
         return
 
     if lower == "list":
@@ -608,6 +622,8 @@ def _cmd_help(reply_ts=None):
         "`list` — sensor numbers, short names, current thresholds\n"
         "`status` — active overrides and silenced sensors\n"
         "`ack` — silence ALL sensors for 10 min\n"
+        "`sentinel on` — resume CS2 alert forwarding\n"
+        "`sentinel off` — pause CS2 alert forwarding\n"
         "`change <sensor> to <value> for 5min` — 5-min threshold override\n"
         "`change <sensor> to <value> for 10min` — 10-min threshold override\n"
         "`change <sensor> to <value> for ever` — permanent threshold change\n"
@@ -743,8 +759,11 @@ def check_cs2_alerts(conn, state: dict) -> list:
         rows = cur.fetchall()
     if not rows:
         return []
-
+    # Always advance the cursor so we don't re-process old alerts when re-enabled
     state["last_cs2_alert_id"] = max(r["id"] for r in rows)
+    if not state.get("cs2_alerts_enabled", True):
+        return []
+
     by_code = defaultdict(list)
     for row in rows:
         by_code[row["code"]].append(row)
@@ -888,9 +907,8 @@ def run():
             log.info("--init complete.")
             return
 
-        # 1. Poll Slack for acks and commands
+        # 1. Poll Slack for acks (commands handled by slack_responder.py)
         check_acknowledgements(state)
-        check_commands(state, conn)
 
         # 2. Detect / update operating mode
         update_mode(conn, state)
