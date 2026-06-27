@@ -1365,60 +1365,47 @@ def generate_summary(conn) -> str:
     except Exception:
         pass
 
-    def linear_trend(mapping, scale=1.0):
-        """Return (lo, hi, slope_per_hour) for mapping over the 12h window, or None."""
+    def trend_arrow(mapping, scale=1.0):
+        """Least-squares slope direction over 12h. Returns '↑', '↓', or '→'."""
         with conn.cursor() as cur:
             cur.execute("SELECT time, value FROM public.double_value_change_events "
                         "WHERE mapping=%s AND time>=%s ORDER BY time", (mapping, since))
             rows = cur.fetchall()
-        if len(rows) < 2:
+        if len(rows) < 3:
             return None
         t0 = rows[0][0].timestamp()
-        xs = np.array([(r[0].timestamp() - t0) / 3600 for r in rows])  # hours
+        xs = np.array([(r[0].timestamp() - t0) / 3600 for r in rows])
         ys = np.array([float(r[1]) * scale for r in rows])
         slope, _ = np.polyfit(xs, ys, 1)
-        return ys.min(), ys.max(), slope
+        # flat if total drift over 12h < 1% of mean
+        mean_val = np.mean(ys)
+        if mean_val != 0 and abs(slope * 12) / abs(mean_val) < 0.01:
+            return "→"
+        return "↑" if slope > 0 else "↓"
 
-    def fmt_slope(slope, unit):
-        sign = "+" if slope >= 0 else ""
-        return f"{sign}{slope:.3g} {unit}/h"
+    # Linear trend direction (least-squares fit through all 12h data points)
+    lines.append("*12h linear trend:*")
 
-    # Sensor min/max + linear trend over the 12h window
-    lines.append("*Sensor range & trend (12h):*")
-
-    temp_lines = []
+    temp_parts = []
     for mapping, label in [("MXC_TEMPERATURE","MXC"), ("STILL_TEMPERATURE","Still"),
                             ("4K_TEMPERATURE","4K"), ("50K_TEMPERATURE","50K")]:
-        scale = 1000.0 if mapping == "MXC_TEMPERATURE" else 1.0
-        unit  = "mK" if mapping == "MXC_TEMPERATURE" else "K"
-        res = linear_trend(mapping, scale)
-        if res:
-            lo, hi, slope = res
-            temp_lines.append(f"{label}: {lo:.3g}–{hi:.3g} {unit}  ({fmt_slope(slope, unit)})")
-    if temp_lines:
-        lines.append("• Temp")
-        for l in temp_lines:
-            lines.append(f"  – {l}")
+        arr = trend_arrow(mapping)
+        if arr:
+            temp_parts.append(f"{label} {arr}")
+    if temp_parts:
+        lines.append("• Temp — " + "  |  ".join(temp_parts))
 
-    pres_lines = []
+    pres_parts = []
     for i in range(1, 8):
-        res = linear_trend(f"P{i}_PRESSURE", scale=1000.0)  # bar → mbar
-        if res:
-            lo, hi, slope = res
-            # pick unit from max value
-            if hi >= 0.1:
-                pres_lines.append(f"P{i}: {lo:.4g}–{hi:.4g} mbar  ({fmt_slope(slope, 'mbar')})")
-            else:
-                pres_lines.append(f"P{i}: {lo*1000:.3g}–{hi*1000:.3g} μbar  ({fmt_slope(slope*1000, 'μbar')})")
-    if pres_lines:
-        lines.append("• Pressure")
-        for l in pres_lines:
-            lines.append(f"  – {l}")
+        arr = trend_arrow(f"P{i}_PRESSURE")
+        if arr:
+            pres_parts.append(f"P{i} {arr}")
+    if pres_parts:
+        lines.append("• Pressure — " + "  |  ".join(pres_parts))
 
-    res = linear_trend("FLOW_VALUE")
-    if res:
-        lo, hi, slope = res
-        lines.append(f"• Flow: {lo:.3f}–{hi:.3f} mmol/s  ({fmt_slope(slope, 'mmol/s')})")
+    arr = trend_arrow("FLOW_VALUE")
+    if arr:
+        lines.append(f"• Flow {arr}")
 
     lines.append("")
 
