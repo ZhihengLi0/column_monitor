@@ -419,6 +419,20 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         _cmd_heater_status(reply_ts, conn)
         return
 
+    _TIME_PAT = r"\d{4}-\d{4}-\d{4}"
+    m = re.fullmatch(rf"plot\s+(\S+)\s+({_TIME_PAT})\s+({_TIME_PAT})", lower)
+    if m:
+        t0 = _parse_plot_time(m.group(2))
+        t1 = _parse_plot_time(m.group(3))
+        if t0 and t1 and t0 < t1:
+            _cmd_plot(m.group(1), reply_ts, conn, start=t0, end=t1)
+        else:
+            send_slack(
+                "Invalid time range. Format: `plot P1 2026-0622-0000 2026-0622-0130`\n"
+                "Times are in CDT (YYYY-MMDD-HHMM).",
+                thread_ts=reply_ts)
+        return
+
     m = re.fullmatch(r"plot\s+(\S+)(?:\s+(\d+)\s*min)?", lower)
     if m:
         minutes = int(m.group(2)) if m.group(2) else 30
@@ -569,7 +583,23 @@ PRESSURE_MAPPINGS_SET = {"P1_PRESSURE","P2_PRESSURE","P3_PRESSURE",
                           "P4_PRESSURE","P5_PRESSURE","P6_PRESSURE","P7_PRESSURE"}
 
 
-def _cmd_plot(sensor_key: str, reply_ts: str, conn=None, minutes: int = 30):
+_CDT = timezone(timedelta(hours=-5))
+
+def _parse_plot_time(s: str) -> datetime | None:
+    """Parse YYYY-MMDD-HHMM (CDT) → UTC datetime. E.g. '2026-0622-0130'."""
+    m = re.fullmatch(r"(\d{4})-(\d{2})(\d{2})-(\d{2})(\d{2})", s)
+    if not m:
+        return None
+    try:
+        dt = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)),
+                      int(m.group(4)), int(m.group(5)), tzinfo=_CDT)
+        return dt.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def _cmd_plot(sensor_key: str, reply_ts: str, conn=None,
+              minutes: int = 30, start: datetime = None, end: datetime = None):
     if conn is None:
         send_slack("Cannot plot: no database connection.", thread_ts=reply_ts)
         return
@@ -581,39 +611,55 @@ def _cmd_plot(sensor_key: str, reply_ts: str, conn=None, minutes: int = 30):
         return
 
     mapping, label, unit = PLOT_SENSORS[key]
-    since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+    if start and end:
+        t_from, t_to = start, end
+        range_label = (f"{t_from.astimezone(_CDT).strftime('%Y-%m-%d %H:%M')}"
+                       f" – {t_to.astimezone(_CDT).strftime('%Y-%m-%d %H:%M')} CDT")
+    else:
+        t_to   = datetime.now(timezone.utc)
+        t_from = t_to - timedelta(minutes=minutes)
+        range_label = f"last {minutes} min"
 
     with conn.cursor() as cur:
         cur.execute(
             "SELECT time, value FROM public.double_value_change_events "
-            "WHERE mapping = %s AND time >= %s ORDER BY time",
-            (mapping, since))
+            "WHERE mapping = %s AND time >= %s AND time <= %s ORDER BY time",
+            (mapping, t_from, t_to))
         rows = cur.fetchall()
 
     if not rows:
-        send_slack(f"No data for *{label}* in the last {minutes} minutes.", thread_ts=reply_ts)
+        send_slack(f"No data for *{label}* ({range_label}).", thread_ts=reply_ts)
         return
 
     times  = [r[0] for r in rows]
     values = [float(r[1]) for r in rows]
 
-    # Convert pressure bar → mbar for display
     is_pressure = mapping in PRESSURE_MAPPINGS_SET
     if is_pressure:
         values = [v * 1000 for v in values]
         unit   = "mbar"
 
-    fig, ax = plt.subplots(figsize=(10, 4))
-    ax.plot(times, values, linewidth=1.2, color="#1f77b4")
-    ax.set_title(f"{label}  —  last {minutes} min  ({len(rows)} points)", fontsize=13)
+    # Wider figure for multi-hour ranges
+    duration_h = (t_to - t_from).total_seconds() / 3600
+    fig_w = max(10, min(16, int(duration_h * 1.5)))
+    fig, ax = plt.subplots(figsize=(fig_w, 4))
+    ax.plot(times, values, linewidth=1.0, color="#1f77b4")
+    ax.set_title(f"{label}  —  {range_label}  ({len(rows)} points)", fontsize=13)
     ax.set_xlabel("Time (CDT)")
     ax.set_ylabel(unit)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M"))
+
+    # Tick format depends on range length
+    if duration_h <= 2:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=_CDT))
+    elif duration_h <= 48:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=_CDT))
+    else:
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d", tz=_CDT))
     ax.xaxis.set_major_locator(mdates.AutoDateLocator())
     fig.autofmt_xdate(rotation=30)
     ax.grid(True, linestyle="--", alpha=0.5)
 
-    # Use scientific notation for very small pressure values
     if is_pressure and max(values) < 0.1:
         ax.yaxis.set_major_formatter(plt.ScalarFormatter(useMathText=True))
         ax.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
@@ -626,12 +672,12 @@ def _cmd_plot(sensor_key: str, reply_ts: str, conn=None, minutes: int = 30):
     fig.savefig(tmp_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
 
-    title = f"{label} — last {minutes} min"
+    title = f"{label} — {range_label}"
     ok = slack_upload_image(tmp_path, title, thread_ts=reply_ts)
     Path(tmp_path).unlink(missing_ok=True)
 
     if ok:
-        log.info(f"Sent plot for {mapping} ({len(rows)} points) to Slack")
+        log.info(f"Sent plot for {mapping} ({len(rows)} points) [{range_label}]")
     else:
         send_slack(
             f"Could not upload plot — bot may need `files:write` scope.\n"
@@ -1148,6 +1194,11 @@ def check_data_freshness(conn, state: dict):
 
 def init_state(conn) -> dict:
     state = _empty_state()
+    # Preserve user preferences that survive a re-init
+    existing = load_state()
+    if existing:
+        state["cs2_alerts_enabled"] = existing.get("cs2_alerts_enabled", True)
+        state["current_mode"]       = existing.get("current_mode")
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(id) FROM public.alerts WHERE severity >= %s",
                     (config.CS2_ALERT_MIN_SEVERITY,))
