@@ -400,8 +400,21 @@ def check_commands(state: dict, conn=None):
     state["last_slack_ts"] = new_ts
 
 
+def _unescape_slack(text: str) -> str:
+    """Strip Slack auto-formatting: <tel:VALUE|DISPLAY> → VALUE, <URL|label> → label."""
+    # <tel:2026-0622-0000|2026-0622-0000> → 2026-0622-0000
+    text = re.sub(r"<tel:([^|>]+)\|[^>]*>", r"\1", text)
+    # <http://...|label> → label
+    text = re.sub(r"<https?://[^|>]+\|([^>]+)>", r"\1", text)
+    # bare <URL> → URL
+    text = re.sub(r"<(https?://[^>]+)>", r"\1", text)
+    # commas acting as separators → spaces
+    text = re.sub(r"\s*,\s*", " ", text)
+    return text.strip()
+
+
 def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
-    lower = text.lower().strip()
+    lower = _unescape_slack(text).lower().strip()
 
     if lower in ("", "help"):
         _cmd_help(reply_ts)
