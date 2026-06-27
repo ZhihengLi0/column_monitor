@@ -1344,7 +1344,7 @@ def generate_summary(conn) -> str:
     lines.append("*CS2 alerts (12h):*")
     if alert_rows:
         for code, title, sev, cnt in alert_rows:
-            emoji = ":red_circle:" if sev >= 2 else ":yellow_circle:"
+            emoji = ":red_circle:" if sev >= 2 else ":large_yellow_circle:"
             lines.append(f"• {emoji} [{code}] {title}" + (f" ×{cnt}" if cnt > 1 else ""))
     else:
         lines.append("• No CS2 alerts")
