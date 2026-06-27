@@ -32,6 +32,7 @@ import json
 import logging
 import tempfile
 import requests
+import numpy as np
 import psycopg2
 import psycopg2.extras
 import matplotlib
@@ -1364,42 +1365,61 @@ def generate_summary(conn) -> str:
     except Exception:
         pass
 
-    # Sensor min/max for all sensors over the 12h window
-    lines.append("*Sensor range (12h):*")
-    temp_range = []
+    def linear_trend(mapping, scale=1.0):
+        """Return (lo, hi, slope_per_hour) for mapping over the 12h window, or None."""
+        with conn.cursor() as cur:
+            cur.execute("SELECT time, value FROM public.double_value_change_events "
+                        "WHERE mapping=%s AND time>=%s ORDER BY time", (mapping, since))
+            rows = cur.fetchall()
+        if len(rows) < 2:
+            return None
+        t0 = rows[0][0].timestamp()
+        xs = np.array([(r[0].timestamp() - t0) / 3600 for r in rows])  # hours
+        ys = np.array([float(r[1]) * scale for r in rows])
+        slope, _ = np.polyfit(xs, ys, 1)
+        return ys.min(), ys.max(), slope
+
+    def fmt_slope(slope, unit):
+        sign = "+" if slope >= 0 else ""
+        return f"{sign}{slope:.3g} {unit}/h"
+
+    # Sensor min/max + linear trend over the 12h window
+    lines.append("*Sensor range & trend (12h):*")
+
+    temp_lines = []
     for mapping, label in [("MXC_TEMPERATURE","MXC"), ("STILL_TEMPERATURE","Still"),
                             ("4K_TEMPERATURE","4K"), ("50K_TEMPERATURE","50K")]:
-        with conn.cursor() as cur:
-            cur.execute("SELECT MIN(value), MAX(value) FROM public.double_value_change_events "
-                        "WHERE mapping=%s AND time>=%s", (mapping, since))
-            r = cur.fetchone()
-        if r and r[0] is not None:
-            lo, hi = float(r[0]), float(r[1])
-            if mapping == "MXC_TEMPERATURE":
-                temp_range.append(f"{label}: {lo*1000:.2f}–{hi*1000:.2f} mK")
-            else:
-                temp_range.append(f"{label}: {lo:.3f}–{hi:.3f} K")
-    if temp_range:
-        lines.append("• Temp — " + "  |  ".join(temp_range))
+        scale = 1000.0 if mapping == "MXC_TEMPERATURE" else 1.0
+        unit  = "mK" if mapping == "MXC_TEMPERATURE" else "K"
+        res = linear_trend(mapping, scale)
+        if res:
+            lo, hi, slope = res
+            temp_lines.append(f"{label}: {lo:.3g}–{hi:.3g} {unit}  ({fmt_slope(slope, unit)})")
+    if temp_lines:
+        lines.append("• Temp")
+        for l in temp_lines:
+            lines.append(f"  – {l}")
 
-    pres_range = []
+    pres_lines = []
     for i in range(1, 8):
-        with conn.cursor() as cur:
-            cur.execute("SELECT MIN(value), MAX(value) FROM public.double_value_change_events "
-                        "WHERE mapping=%s AND time>=%s", (f"P{i}_PRESSURE", since))
-            r = cur.fetchone()
-        if r and r[0] is not None:
-            lo, hi = float(r[0]), float(r[1])
-            pres_range.append(f"P{i}: {_fmt_pressure(lo)}–{_fmt_pressure(hi)}")
-    if pres_range:
-        lines.append("• Pressure — " + "  |  ".join(pres_range))
+        res = linear_trend(f"P{i}_PRESSURE", scale=1000.0)  # bar → mbar
+        if res:
+            lo, hi, slope = res
+            # pick unit from max value
+            if hi >= 0.1:
+                pres_lines.append(f"P{i}: {lo:.4g}–{hi:.4g} mbar  ({fmt_slope(slope, 'mbar')})")
+            else:
+                pres_lines.append(f"P{i}: {lo*1000:.3g}–{hi*1000:.3g} μbar  ({fmt_slope(slope*1000, 'μbar')})")
+    if pres_lines:
+        lines.append("• Pressure")
+        for l in pres_lines:
+            lines.append(f"  – {l}")
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT MIN(value), MAX(value) FROM public.double_value_change_events "
-                    "WHERE mapping='FLOW_VALUE' AND time>=%s", (since,))
-        r = cur.fetchone()
-    if r and r[0] is not None:
-        lines.append(f"• Flow — {float(r[0]):.3f}–{float(r[1]):.3f} mmol/s")
+    res = linear_trend("FLOW_VALUE")
+    if res:
+        lo, hi, slope = res
+        lines.append(f"• Flow: {lo:.3f}–{hi:.3f} mmol/s  ({fmt_slope(slope, 'mmol/s')})")
+
     lines.append("")
 
     return "\n".join(lines)
