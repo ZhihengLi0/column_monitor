@@ -509,7 +509,7 @@ def check_commands(state: dict, conn=None):
         text = msg.get("text", "")
         if bot_tag in text:
             clean = re.sub(r"<@[A-Z0-9]+>", "", text).strip()
-            _execute_command(clean, ts, state, conn)
+            _execute_command(clean, ts, state, conn, user_id=msg.get("user", "default"))
 
     state["last_slack_ts"] = new_ts
 
@@ -527,8 +527,28 @@ def _unescape_slack(text: str) -> str:
     return text.strip()
 
 
-def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
+def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: str = "default"):
     lower = _unescape_slack(text).lower().strip()
+
+    # ── Context memory (10-minute window) ────────────────────────────────────
+    ctx = state.get("ctx", {})
+    ctx_age = datetime.now().timestamp() - ctx.get("ts", 0)
+    ctx_valid = ctx_age < 600
+
+    def _update_ctx(**kwargs):
+        state["ctx"] = {**kwargs, "ts": datetime.now().timestamp()}
+
+    # Context pronoun shortcuts:  "那画个图" / "plot it" / "longer"
+    _PRONOUNS = re.compile(r"\b(那|它|it\b|same|that|前面|刚才|之前)\b")
+    if _PRONOUNS.search(lower) and ctx_valid and ctx.get("sensor_key"):
+        # Replace pronoun with remembered sensor key so later parsing picks it up
+        lower = _PRONOUNS.sub(ctx["sensor_key"].lower(), lower, count=1)
+
+    if any(w in lower for w in ("longer", "extend", "更长", "时间长", "久一点")) and ctx_valid and ctx.get("sensor_key"):
+        new_min = ctx.get("minutes", 30) * 4
+        _cmd_plot(ctx["sensor_key"], reply_ts, conn, minutes=new_min)
+        _update_ctx(sensor_key=ctx["sensor_key"], intent="plot", minutes=new_min)
+        return
 
     if lower in ("", "help"):
         _cmd_help(reply_ts)
@@ -546,27 +566,46 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         _cmd_heater_status(reply_ts, conn)
         return
 
-    _TIME_PAT = r"\d{6}_\d{4}"
-    m = re.fullmatch(rf"plot\s+(\S+)\s+({_TIME_PAT})\s+({_TIME_PAT})", lower)
-    if m:
-        t0 = _parse_plot_time(m.group(2))
-        t1 = _parse_plot_time(m.group(3))
-        if t0 and t1 and t0 < t1:
-            _cmd_plot(m.group(1), reply_ts, conn, start=t0, end=t1)
-        else:
-            send_slack(
-                "Invalid time range. Format: `plot P1 260622_0000 260622_0130`\n"
-                "Times are in CDT (YYMMDD_HHMM).",
-                thread_ts=reply_ts)
-        return
+    # ── Plot parser: handles 1 or multiple sensors + time range or duration ──
+    if lower.startswith("plot"):
+        _TIME_PAT_RE = re.compile(r"^(\d{6}_\d{4})$")
+        _DUR_RE      = re.compile(r"^(\d+)(h|min)$")
+        tokens = lower.split()[1:]   # everything after "plot"
+        sensor_keys, time_tokens, minutes = [], [], 30
+        for tok in tokens:
+            if _TIME_PAT_RE.fullmatch(tok):
+                time_tokens.append(tok)
+            elif _DUR_RE.fullmatch(tok):
+                dm = _DUR_RE.fullmatch(tok)
+                minutes = int(dm.group(1)) * (60 if dm.group(2) == "h" else 1)
+            elif tok.upper() in PLOT_SENSORS:
+                sensor_keys.append(tok.upper())
 
-    m = re.fullmatch(r"plot\s+(\S+)(?:\s+(\d+)\s*(h|min))?", lower)
-    if m:
-        if m.group(2):
-            minutes = int(m.group(2)) * 60 if m.group(3) == "h" else int(m.group(2))
+        if not sensor_keys and ctx_valid and ctx.get("sensor_key"):
+            sensor_keys = [ctx["sensor_key"]]   # "plot 12h" uses last sensor
+
+        if not sensor_keys:
+            send_slack("Which sensor? e.g. `plot P2 12h`, `plot P2 P5 2h`", thread_ts=reply_ts)
+            return
+
+        if len(time_tokens) >= 2:
+            t0 = _parse_plot_time(time_tokens[0])
+            t1 = _parse_plot_time(time_tokens[1])
+            if t0 and t1 and t0 < t1:
+                if len(sensor_keys) == 1:
+                    _cmd_plot(sensor_keys[0], reply_ts, conn, start=t0, end=t1)
+                else:
+                    _cmd_plot_multi(sensor_keys, reply_ts, conn, start=t0, end=t1)
+                _update_ctx(sensor_key=sensor_keys[-1], intent="plot", minutes=minutes)
+            else:
+                send_slack("Invalid time range. Format: `plot P1 260622_0000 260622_0130` (CDT)",
+                           thread_ts=reply_ts)
         else:
-            minutes = 30
-        _cmd_plot(m.group(1), reply_ts, conn, minutes=minutes)
+            if len(sensor_keys) == 1:
+                _cmd_plot(sensor_keys[0], reply_ts, conn, minutes=minutes)
+            else:
+                _cmd_plot_multi(sensor_keys, reply_ts, conn, minutes=minutes)
+            _update_ctx(sensor_key=sensor_keys[-1], intent="plot", minutes=minutes)
         return
 
     m = re.fullmatch(r"sentinel\s+(on|off)", lower)
@@ -741,22 +780,23 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         }
 
         if intent == "plot":
-            sensor_key = None
-            if ent.get("sensor"):
-                # reverse-map mapping name → PLOT_SENSORS key
-                for k, (m, _, _) in PLOT_SENSORS.items():
-                    if m == ent["sensor"]:
-                        sensor_key = k
-                        break
-            if sensor_key is None:
+            # Resolve all extracted sensors → PLOT_SENSORS keys
+            mapping_to_key = {v[0]: k for k, v in PLOT_SENSORS.items()}
+            sensor_keys_nlp = [mapping_to_key[m] for m in ent.get("sensors", [])
+                                if m in mapping_to_key]
+            # Fall back to context if nothing extracted
+            if not sensor_keys_nlp and ctx_valid and ctx.get("sensor_key"):
+                sensor_keys_nlp = [ctx["sensor_key"]]
+            if not sensor_keys_nlp:
                 send_slack("Which sensor would you like to plot? (e.g. P2, MXC, FLOW)",
                            thread_ts=reply_ts)
                 return
-            tr = ent.get("range")
-            if tr:
-                from nlp_intent import _parse_plot_time  # not available; use monitor's
-                pass  # fall through to minutes
-            _cmd_plot(sensor_key, reply_ts, conn, minutes=ent.get("minutes", 30))
+            plot_min = ent.get("minutes") or (ctx.get("minutes", 30) if ctx_valid else 30)
+            if len(sensor_keys_nlp) == 1:
+                _cmd_plot(sensor_keys_nlp[0], reply_ts, conn, minutes=plot_min)
+            else:
+                _cmd_plot_multi(sensor_keys_nlp, reply_ts, conn, minutes=plot_min)
+            _update_ctx(sensor_key=sensor_keys_nlp[-1], intent="plot", minutes=plot_min)
 
         elif intent == "pressure_reading":
             _cmd_pressure(reply_ts, conn)
@@ -1011,6 +1051,114 @@ def _cmd_plot(sensor_key: str, reply_ts: str, conn=None,
             f"Could not upload plot — bot may need `files:write` scope.\n"
             f"Go to api.slack.com/apps → OAuth & Permissions → add `files:write` → Reinstall.",
             thread_ts=reply_ts)
+
+
+def _cmd_plot_multi(sensor_keys: list, reply_ts: str, conn=None,
+                    minutes: int = 30, start: datetime = None, end: datetime = None):
+    """Plot 2+ sensors on one figure; dual y-axis when units differ."""
+    if conn is None:
+        send_slack("Cannot plot: no database connection.", thread_ts=reply_ts)
+        return
+
+    keys = [k.upper() for k in sensor_keys if k.upper() in PLOT_SENSORS]
+    if not keys:
+        send_slack(f"No valid sensors. Available: {', '.join(PLOT_SENSORS.keys())}", thread_ts=reply_ts)
+        return
+
+    if start and end:
+        t_from, t_to = start, end
+        range_label = (f"{t_from.astimezone(_CDT).strftime('%Y-%m-%d %H:%M')}"
+                       f" – {t_to.astimezone(_CDT).strftime('%Y-%m-%d %H:%M')} CDT")
+    else:
+        t_to   = datetime.now(timezone.utc)
+        t_from = t_to - timedelta(minutes=minutes)
+        range_label = f"last {minutes} min"
+
+    # Fetch and convert each sensor's data
+    sensor_data = {}
+    for key in keys:
+        mapping, label, unit = PLOT_SENSORS[key]
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT time, value FROM public.double_value_change_events "
+                "WHERE mapping = %s AND time >= %s AND time <= %s ORDER BY time",
+                (mapping, t_from, t_to))
+            rows = cur.fetchall()
+        if not rows:
+            continue
+        vals = [float(r[1]) for r in rows]
+        disp_unit = unit
+        if mapping in PRESSURE_MAPPINGS_SET:
+            vals = [v * 1000 for v in vals]
+            disp_unit = "mbar"
+        elif mapping == "MXC_TEMPERATURE":
+            vals = [v * 1000 for v in vals]
+            disp_unit = "mK"
+        sensor_data[key] = {"times": [r[0] for r in rows], "values": vals,
+                             "label": label, "unit": disp_unit}
+
+    if not sensor_data:
+        send_slack(f"No data for {' + '.join(keys)} ({range_label}).", thread_ts=reply_ts)
+        return
+
+    # Group by display unit for axis assignment
+    units_order = []
+    for k in keys:
+        if k in sensor_data:
+            u = sensor_data[k]["unit"]
+            if u not in units_order:
+                units_order.append(u)
+
+    colors = ["#1f77b4", "#d62728", "#2ca02c", "#ff7f0e", "#9467bd", "#8c564b"]
+    duration_h = (t_to - t_from).total_seconds() / 3600
+    fig_w = max(10, min(16, int(duration_h * 1.5)))
+    fig, ax1 = plt.subplots(figsize=(fig_w, 4))
+    ax2 = ax1.twinx() if len(units_order) > 1 else None
+
+    lines, col_i = [], 0
+    for key in keys:
+        if key not in sensor_data:
+            continue
+        d = sensor_data[key]
+        ax = ax1 if d["unit"] == units_order[0] else ax2
+        line, = ax.plot(d["times"], d["values"], linewidth=1.0,
+                        color=colors[col_i % len(colors)], label=d["label"])
+        lines.append(line)
+        col_i += 1
+
+    ax1.set_ylabel(units_order[0])
+    if ax2 and len(units_order) > 1:
+        ax2.set_ylabel(units_order[1])
+
+    sensor_names = " + ".join(k for k in keys if k in sensor_data)
+    total_pts = sum(len(d["times"]) for d in sensor_data.values())
+    ax1.set_title(f"{sensor_names}  —  {range_label}  ({total_pts} pts)", fontsize=12)
+    ax1.set_xlabel("Time (CDT)")
+    ax1.legend(lines, [l.get_label() for l in lines], loc="upper left", fontsize=9)
+
+    if duration_h <= 2:
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=_CDT))
+    elif duration_h <= 48:
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=_CDT))
+    else:
+        ax1.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d", tz=_CDT))
+    ax1.xaxis.set_major_locator(mdates.AutoDateLocator())
+    fig.autofmt_xdate(rotation=30)
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    plt.tight_layout()
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False,
+                                     dir="/home/cdms/.claude/jobs/b7b666c4/tmp") as f:
+        tmp_path = f.name
+    fig.savefig(tmp_path, dpi=120, bbox_inches="tight")
+    plt.close(fig)
+
+    ok = slack_upload_image(tmp_path, f"{sensor_names} — {range_label}", thread_ts=reply_ts)
+    Path(tmp_path).unlink(missing_ok=True)
+    if ok:
+        log.info(f"Sent multi-plot for {sensor_names} ({total_pts} pts) [{range_label}]")
+    else:
+        send_slack("Could not upload plot.", thread_ts=reply_ts)
 
 
 def _cmd_pump_status(reply_ts: str, conn=None):

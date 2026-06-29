@@ -353,21 +353,21 @@ _classifier = IntentClassifier()
 
 # Sensor keywords — use (?<!\d) / (?!\d) instead of \b so Chinese chars don't break matching
 _SENSOR_PATTERNS = [
-    (r"mxc[\s_]?far|mxcfar",               "MXC_TEMPERATURE_FAR"),
-    (r"mxc(?!\w)|mxc温度",                 "MXC_TEMPERATURE"),
-    (r"still(?!\w)|still温度",             "STILL_TEMPERATURE"),
-    (r"(?<![0-9])4k(?!\w)|4k板",           "4K_TEMPERATURE"),
-    (r"50k(?!\w)|50k板",                   "50K_TEMPERATURE"),
-    (r"b1a(?!\w)",                          "B1A_TEMPERATURE"),
-    (r"(?<![0-9a-zA-Z])b2(?!\w)",          "B2_TEMPERATURE"),
-    (r"(?<![0-9a-zA-Z])p1(?!\d)|p1压力",  "P1_PRESSURE"),
-    (r"(?<![0-9a-zA-Z])p2(?!\d)|p2压力",  "P2_PRESSURE"),
-    (r"(?<![0-9a-zA-Z])p3(?!\d)",          "P3_PRESSURE"),
-    (r"(?<![0-9a-zA-Z])p4(?!\d)",          "P4_PRESSURE"),
-    (r"(?<![0-9a-zA-Z])p5(?!\d)|p5压力",  "P5_PRESSURE"),
-    (r"(?<![0-9a-zA-Z])p6(?!\d)",          "P6_PRESSURE"),
-    (r"(?<![0-9a-zA-Z])p7(?!\d)",          "P7_PRESSURE"),
-    (r"flow(?!\w)|流量|he流量",            "FLOW_VALUE"),
+    (r"mxc[\s_]?far|mxcfar",                   "MXC_TEMPERATURE_FAR"),
+    (r"mxc(?![a-z0-9])|mxc温度",               "MXC_TEMPERATURE"),
+    (r"still(?![a-z0-9])|still温度",           "STILL_TEMPERATURE"),
+    (r"(?<![0-9])4k(?![a-z0-9])|4k板",         "4K_TEMPERATURE"),
+    (r"50k(?![a-z0-9])|50k板",                 "50K_TEMPERATURE"),
+    (r"b1a(?![a-z0-9])",                        "B1A_TEMPERATURE"),
+    (r"(?<![0-9a-z])b2(?![a-z0-9])",           "B2_TEMPERATURE"),
+    (r"(?<![0-9a-z])p1(?!\d)|p1压力",          "P1_PRESSURE"),
+    (r"(?<![0-9a-z])p2(?!\d)|p2压力",          "P2_PRESSURE"),
+    (r"(?<![0-9a-z])p3(?!\d)",                  "P3_PRESSURE"),
+    (r"(?<![0-9a-z])p4(?!\d)",                  "P4_PRESSURE"),
+    (r"(?<![0-9a-z])p5(?!\d)|p5压力",          "P5_PRESSURE"),
+    (r"(?<![0-9a-z])p6(?!\d)",                  "P6_PRESSURE"),
+    (r"(?<![0-9a-z])p7(?!\d)",                  "P7_PRESSURE"),
+    (r"flow(?![a-z0-9])|流量|he流量",          "FLOW_VALUE"),
 ]
 
 def _extract_sensor(text: str):
@@ -376,6 +376,16 @@ def _extract_sensor(text: str):
         if re.search(pattern, t, re.IGNORECASE):
             return mapping
     return None
+
+
+def _extract_all_sensors(text: str) -> list:
+    """Return all sensor mappings found in text (for multi-sensor plot)."""
+    t = text.lower()
+    found = []
+    for pattern, mapping in _SENSOR_PATTERNS:
+        if mapping not in found and re.search(pattern, t, re.IGNORECASE):
+            found.append(mapping)
+    return found
 
 
 _CHINESE_HOURS = {"一": 1, "两": 2, "三": 3, "四": 4, "五": 5,
@@ -484,7 +494,9 @@ def _extract_on_off(text: str):
 def extract_entities(text: str, intent: str) -> dict:
     entities = {}
     if intent == "plot":
-        entities["sensor"]   = _extract_sensor(text)
+        all_s = _extract_all_sensors(text)
+        entities["sensor"]   = all_s[0] if all_s else None   # first sensor (primary)
+        entities["sensors"]  = all_s                          # all sensors (multi-plot)
         entities["minutes"]  = _extract_duration_minutes(text) or 30
         entities["range"]    = _extract_time_range(text)
 
