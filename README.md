@@ -817,7 +817,7 @@ Available sensors: `P1`–`P7`, `MXC`, `STILL`, `4K`, `50K`, `FLOW`
 |---|---|
 | `longer` | Re-plot the last sensor at 4× the previous time range |
 | `plot 12h` | Plot the last sensor at a new duration |
-| `那画个图` / `plot it` | Plot the last sensor again |
+| `plot it` / `plot again` | Plot the last sensor again |
 
 #### Acknowledgement
 
@@ -926,14 +926,14 @@ The classifier is a **TF-IDF + Logistic Regression** pipeline trained on ~200 bi
 ### Natural language examples
 
 ```
-@BlueFors-Alert P2压力最近一小时怎么样
-@BlueFors-Alert MXC温度超标了，提高阈值到35mK
-@BlueFors-Alert 泵的状态
-@BlueFors-Alert 关闭预警
-@BlueFors-Alert 画P5的图，12小时
-@BlueFors-Alert cold模式下P2阈值改成5e-4
-@BlueFors-Alert 总结一下最近12小时发生了什么
-@BlueFors-Alert P2和P5的压力对比图 2h
+@BlueFors-Alert how is P2 pressure doing in the last hour
+@BlueFors-Alert MXC temperature is too high, raise the threshold to 35 mK
+@BlueFors-Alert what is the pump doing
+@BlueFors-Alert turn off alerts
+@BlueFors-Alert show me a plot of P5 for 12 hours
+@BlueFors-Alert set cold mode P2 threshold to 5e-4
+@BlueFors-Alert summarize the last 12 hours
+@BlueFors-Alert comparison plot of P2 and P5 for 2 hours
 @BlueFors-Alert what's the pump doing
 @BlueFors-Alert show me the heater status
 @BlueFors-Alert plot P2 for the last two hours
@@ -956,7 +956,7 @@ The bot:
 2. Rebuilds the classifier immediately (< 0.5 s, on-device)
 3. Confirms: "✅ Got it — I'll treat that as *heater status* next time."
 
-To **confirm** a correct detection, reply `yes` / `correct` / `对` — this also adds the phrase as a positive training example, improving accuracy over time.
+To **confirm** a correct detection, reply `yes` or `correct` — this also adds the phrase as a positive training example, improving accuracy over time.
 
 All learned examples persist across restarts. The system becomes more accurate with regular use.
 
@@ -967,7 +967,7 @@ The bot remembers the last sensor and time range for **10 minutes**:
 ```
 @BlueFors-Alert plot P2 12h          ← remembered
 @BlueFors-Alert longer               ← extends to 48h, same sensor
-@BlueFors-Alert 那再画个图            ← P2 again from context
+@BlueFors-Alert plot it again        ← P2 again from context
 @BlueFors-Alert plot 2h              ← "plot" without sensor → uses P2
 ```
 
@@ -1240,7 +1240,7 @@ This release series marks a fundamental shift: the bot moves from rigid command 
 |---------|-----|-------------|
 | 3.0.0 | [v3.0.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.0.0) | **Natural language understanding** — `nlp_intent.py` adds a local TF-IDF + Logistic Regression classifier. Supports 12 intents in Chinese and English via character n-grams; no API cost, runs on-device in < 10 ms. All existing exact-match commands continue to work. Entity extraction: sensor names, durations, time ranges, numeric values with unit conversion (mK→K, mbar→bar), cold/idle mode prefix, on/off |
 | 3.1.0 | [v3.1.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.1.0) | **Self-learning from Slack feedback** — when NLP confidence < 45%, the bot appends a correction invite in thread. User replies `"wrong, I meant pump status"` → example saved to `nlp_user_examples.jsonl` → classifier rebuilt immediately. Confirmed correct responses (`yes`/`correct`) also add positive training examples. Accuracy improves organically through normal use with no manual retraining |
-| 3.2.0 | [v3.2.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.2.0) | **Multi-sensor comparison plots + conversation context** — `plot P2 P5 2h` overlays multiple sensors on one chart; dual y-axis when units differ (mbar vs K). Conversation context window (10 min): `longer` extends the last plot, `plot 2h` reuses the last sensor, pronoun `那`/`it` resolves to last sensor |
+| 3.2.0 | [v3.2.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.2.0) | **Multi-sensor comparison plots + conversation context** — `plot P2 P5 2h` overlays multiple sensors on one chart; dual y-axis when units differ (mbar vs K). Conversation context window (10 min): `longer` extends the last plot, `plot 2h` reuses the last sensor, `plot it` resolves to last sensor |
 
 ---
 
