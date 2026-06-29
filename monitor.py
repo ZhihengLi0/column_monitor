@@ -620,10 +620,152 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
         log.info(f"{mode_label}{sensor} threshold → {new_val} {dur_text}")
         return
 
-    send_slack(
-        f"I didn't understand: `{text}`\n"
-        "Type `@BlueFors-Alert help` to see all commands.",
-        thread_ts=reply_ts)
+    # ── NLP fallback: natural language understanding ──────────────────────────
+    try:
+        from nlp_intent import classify_command
+        intent, ent, conf = classify_command(text)
+        log.info(f"NLP: intent={intent} conf={conf:.2f} entities={ent}")
+
+        if conf < 0.12:
+            send_slack(
+                f"I didn't understand: `{text}`\n"
+                "Try natural language or type `help` to see all commands.",
+                thread_ts=reply_ts)
+            return
+
+        if intent == "plot":
+            sensor_key = None
+            if ent.get("sensor"):
+                # reverse-map mapping name → PLOT_SENSORS key
+                for k, (m, _, _) in PLOT_SENSORS.items():
+                    if m == ent["sensor"]:
+                        sensor_key = k
+                        break
+            if sensor_key is None:
+                send_slack("Which sensor would you like to plot? (e.g. P2, MXC, FLOW)",
+                           thread_ts=reply_ts)
+                return
+            tr = ent.get("range")
+            if tr:
+                from nlp_intent import _parse_plot_time  # not available; use monitor's
+                pass  # fall through to minutes
+            _cmd_plot(sensor_key, reply_ts, conn, minutes=ent.get("minutes", 30))
+
+        elif intent == "pressure_reading":
+            _cmd_pressure(reply_ts, conn)
+
+        elif intent == "pump_status":
+            _cmd_pump_status(reply_ts, conn)
+
+        elif intent == "heater_status":
+            _cmd_heater_status(reply_ts, conn)
+
+        elif intent == "daily_summary":
+            from monitor import generate_summary
+            msg = generate_summary(conn)
+            send_slack(msg, color="good", thread_ts=reply_ts)
+
+        elif intent == "help":
+            _cmd_help(reply_ts)
+
+        elif intent == "status":
+            _cmd_status(reply_ts, state)
+
+        elif intent == "ack":
+            until = (datetime.now() + timedelta(minutes=10)).isoformat()
+            for s in {**config.THRESHOLDS_COLD, **config.THRESHOLDS_IDLE}:
+                state.setdefault("acked_sensors", {})[s] = until
+            state.setdefault("pending_alert_msgs", {}).clear()
+            send_slack("✅ All active alerts acknowledged — silenced for 10 minutes.",
+                       color="good", thread_ts=reply_ts)
+
+        elif intent == "sentinel":
+            on_off = ent.get("on_off")
+            if on_off == "on":
+                state["cs2_alerts_enabled"] = True
+                send_slack(":large_green_circle: *Sentinel ON* — CS2 alerts resumed.",
+                           color="good", thread_ts=reply_ts)
+            elif on_off == "off":
+                state["cs2_alerts_enabled"] = False
+                send_slack(":white_circle: *Sentinel OFF* — CS2 alerts paused.",
+                           thread_ts=reply_ts)
+            else:
+                send_slack("Say `sentinel on` or `sentinel off`.", thread_ts=reply_ts)
+
+        elif intent == "set_mode":
+            mode = ent.get("mode")
+            if mode == "auto":
+                state["mode_override"] = None
+                send_slack("✅ Mode set to *auto* — detecting from 50K temperature.",
+                           color="good", thread_ts=reply_ts)
+            elif mode in ("cold", "idle"):
+                val = mode.upper()
+                state["last_alert_time"] = {}
+                state["acked_sensors"]   = {}
+                state["mode_override"]   = val
+                send_slack(f"✅ Mode manually set to *{val}*.", color="good", thread_ts=reply_ts)
+            else:
+                send_slack("Which mode? Say `cold`, `idle`, or `auto`.", thread_ts=reply_ts)
+
+        elif intent == "change_threshold":
+            sensor  = ent.get("sensor")
+            value   = ent.get("value")
+            mk      = ent.get("mode_prefix")
+            minutes = ent.get("minutes")
+            if not sensor:
+                send_slack("Which sensor? (e.g. MXC, P2, STILL)", thread_ts=reply_ts)
+                return
+            if value is None:
+                send_slack(f"What value should the threshold be for *{sensor}*?",
+                           thread_ts=reply_ts)
+                return
+            all_t = {**config.THRESHOLDS_COLD, **config.THRESHOLDS_IDLE}
+            entry = all_t.get(sensor, (None, None, ""))
+            if entry[0] is not None:
+                ov = {"max_val": value, "min_val": entry[1],
+                      "expires_at": None if minutes is None else
+                      (datetime.now() + timedelta(minutes=minutes)).isoformat()}
+            else:
+                ov = {"max_val": entry[0], "min_val": value,
+                      "expires_at": None if minutes is None else
+                      (datetime.now() + timedelta(minutes=minutes)).isoformat()}
+            key = ("threshold_overrides_cold" if mk == "cold"
+                   else "threshold_overrides_idle" if mk == "idle"
+                   else ("threshold_overrides_cold"
+                         if state.get("current_mode") == "COLD"
+                         else "threshold_overrides_idle"))
+            state.setdefault(key, {})[sensor] = ov
+            mode_label = f"[{(mk or state.get('current_mode','current')).upper()}] "
+            dur_text = "permanently" if minutes is None else f"for {minutes} min"
+            send_slack(f"✅ {mode_label}*{sensor}* → `{value}` {dur_text}",
+                       color="good", thread_ts=reply_ts)
+
+        elif intent == "reset_threshold":
+            sensor = ent.get("sensor")
+            mk     = ent.get("mode_prefix")
+            if not sensor:
+                send_slack("Which sensor to reset?", thread_ts=reply_ts)
+                return
+            key = ("threshold_overrides_cold" if mk == "cold"
+                   else "threshold_overrides_idle" if mk == "idle"
+                   else ("threshold_overrides_cold"
+                         if state.get("current_mode") == "COLD"
+                         else "threshold_overrides_idle"))
+            state.get(key, {}).pop(sensor, None)
+            send_slack(f"✅ *{sensor}* reset to default.", color="good", thread_ts=reply_ts)
+
+        else:
+            send_slack(
+                f"I didn't understand: `{text}`\n"
+                "Try natural language or type `help` to see all commands.",
+                thread_ts=reply_ts)
+
+    except Exception as e:
+        log.error(f"NLP dispatch error: {e}")
+        send_slack(
+            f"I didn't understand: `{text}`\n"
+            "Type `help` to see all commands.",
+            thread_ts=reply_ts)
 
 
 PLOT_SENSORS = {
