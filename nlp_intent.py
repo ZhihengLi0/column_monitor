@@ -22,6 +22,7 @@ INTENT_LABELS = {
     "pressure_reading": "pressure reading",
     "pump_status":      "pump status",
     "heater_status":    "heater status",
+    "valve_status":     "valve status",
     "change_threshold": "change threshold",
     "reset_threshold":  "reset threshold",
     "sentinel":         "sentinel on/off",
@@ -137,6 +138,25 @@ TRAINING_DATA = [
     ("热开关状态",                            "heater_status"),
     ("加热器开着吗",                          "heater_status"),
     ("查看加热器",                            "heater_status"),
+
+    # valve_status
+    ("valve status",                          "valve_status"),
+    ("show valve status",                     "valve_status"),
+    ("which valves are open",                 "valve_status"),
+    ("valve states",                          "valve_status"),
+    ("check valves",                          "valve_status"),
+    ("show all valves",                       "valve_status"),
+    ("what valves are open",                  "valve_status"),
+    ("valve open closed",                     "valve_status"),
+    ("list valve status",                     "valve_status"),
+    ("are the valves open",                   "valve_status"),
+    ("V112 status",                           "valve_status"),
+    ("V113 open or closed",                   "valve_status"),
+    ("valve check",                           "valve_status"),
+    ("阀门状态",                              "valve_status"),
+    ("哪些阀门是开的",                        "valve_status"),
+    ("阀门开着吗",                            "valve_status"),
+    ("查看阀门",                              "valve_status"),
 
     # ── change_threshold ──────────────────────────────────────────────────────
     ("change MXC to 0.035 for ever",          "change_threshold"),

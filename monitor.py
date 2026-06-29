@@ -566,6 +566,10 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
         _cmd_heater_status(reply_ts, conn)
         return
 
+    if re.fullmatch(r"valve\s+status", lower):
+        _cmd_valve_status(reply_ts, conn)
+        return
+
     # ── Plot parser: handles 1 or multiple sensors + time range or duration ──
     if lower.startswith("plot"):
         _TIME_PAT_RE = re.compile(r"^(\d{6}_\d{4})$")
@@ -806,6 +810,9 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
 
         elif intent == "heater_status":
             _cmd_heater_status(reply_ts, conn)
+
+        elif intent == "valve_status":
+            _cmd_valve_status(reply_ts, conn)
 
         elif intent == "daily_summary":
             from monitor import generate_summary
@@ -1610,6 +1617,84 @@ def _cmd_heater_status(reply_ts: str, conn=None):
     log.info("Sent heater status reply to Slack")
 
 
+# ── Valve status command ──────────────────────────────────────────────────────
+
+VALVE_MAPPINGS = [
+    "V001", "V003", "V004", "V005",
+    "V101", "V102", "V104", "V105", "V106", "V107", "V108",
+    "V110", "V111", "V112", "V113", "V114",
+    "V201G", "V202", "V203",
+    "V401", "V402", "V403",
+    "V501H", "V502H", "V503H",
+]
+
+def _cmd_valve_status(reply_ts: str, conn=None):
+    if conn is None:
+        send_slack("Cannot read valve status: no database connection.", thread_ts=reply_ts)
+        return
+
+    lines = [":valve: *Valve Status*\n"]
+    open_valves, closed_valves = [], []
+
+    for v in VALVE_MAPPINGS:
+        mapping = f"{v}_ENABLED"
+        with conn.cursor() as cur:
+            cur.execute("SELECT value, time FROM public.boolean_value_change_events "
+                        "WHERE mapping = %s ORDER BY time DESC LIMIT 1", (mapping,))
+            row = cur.fetchone()
+        if row is None:
+            continue
+        is_open = bool(row[0])
+        ts_str  = str(row[1])[:16]
+        if is_open:
+            open_valves.append(f":large_green_circle: *{v}* — OPEN  _(at {ts_str})_")
+        else:
+            closed_valves.append(f":white_circle: {v} — closed")
+
+    if open_valves:
+        lines.append("*Open valves:*")
+        lines.extend(open_valves)
+        lines.append("")
+
+    lines.append("*Closed valves:*")
+    lines.extend(closed_valves)
+
+    send_slack("\n".join(lines), color="#2E86AB", thread_ts=reply_ts)
+    log.info("Sent valve status reply to Slack")
+
+
+# ── Valve change alerts (V112, V113, V114) ───────────────────────────────────
+
+MONITORED_VALVES = [
+    ("V112_ENABLED", "V112"),
+    ("V113_ENABLED", "V113"),
+    ("V114_ENABLED", "V114"),
+]
+
+def check_valve_changes(conn, state: dict) -> list:
+    """Alert on any state change in V112, V113, V114 — both COLD and IDLE modes."""
+    last_id = state.get("last_valve_event_id", 0)
+    mappings = [m for m, _ in MONITORED_VALVES]
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            "SELECT id, mapping, value, time FROM public.boolean_value_change_events "
+            "WHERE mapping = ANY(%s) AND id > %s ORDER BY id",
+            (mappings, last_id))
+        rows = cur.fetchall()
+    if not rows:
+        return []
+
+    state["last_valve_event_id"] = max(r["id"] for r in rows)
+    label_map = dict(MONITORED_VALVES)
+    msgs = []
+    for row in rows:
+        label  = label_map.get(row["mapping"], row["mapping"])
+        status = ":large_green_circle: *OPEN*" if row["value"] else ":red_circle: *CLOSED*"
+        msgs.append(f":warning: *Valve {label}* changed → {status}\nTime: {row['time']}")
+        log.info(f"Valve change: {row['mapping']} = {row['value']}")
+    return msgs
+
+
 def check_cold_cathode(conn, state: dict):
     mode = state.get("current_mode")
     if mode not in ("IDLE", "COLD"):
@@ -1687,6 +1772,9 @@ def init_state(conn) -> dict:
                     "WHERE mapping IN ('HEATSWITCH_STILL_ENABLED','HEATSWITCH_MXC_ENABLED',"
                     "'STILL_HEATER_ENABLED','MXC_HEATER_ENABLED','PULSE_TUBE_ENABLED')")
         state["last_heater_event_id"] = cur.fetchone()[0] or 0
+        cur.execute("SELECT MAX(id) FROM public.boolean_value_change_events "
+                    "WHERE mapping IN ('V112_ENABLED','V113_ENABLED','V114_ENABLED')")
+        state["last_valve_event_id"] = cur.fetchone()[0] or 0
         cur.execute("SELECT id, value FROM public.double_value_change_events "
                     "WHERE mapping = 'R1A_PUMP_POWER' ORDER BY id DESC LIMIT 1")
         row = cur.fetchone()
@@ -1771,6 +1859,9 @@ def generate_summary(conn) -> str:
         ("MXC_HEATER_ENABLED",      "MXC Heater"),
         ("PULSE_TUBE_ENABLED",      "Pulse Tube"),
         ("P1_ENABLED",              "Cold Cathode (P1)"),
+        ("V112_ENABLED",            "Valve V112"),
+        ("V113_ENABLED",            "Valve V113"),
+        ("V114_ENABLED",            "Valve V114"),
     ]
     change_lines = []
     for mapping, label in TRACKED:
@@ -1919,6 +2010,9 @@ def run():
             all_alerts.append((None, msg))
 
         for msg in check_heater_status(conn, state):
+            all_alerts.append((None, msg))
+
+        for msg in check_valve_changes(conn, state):
             all_alerts.append((None, msg))
 
         msg = check_cold_cathode(conn, state)
