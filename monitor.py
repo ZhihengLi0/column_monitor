@@ -589,16 +589,21 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None):
             expires_at = None
             dur_text   = "*permanently*"
         else:
-            mins_m = re.match(r"(\d+)\s*min", raw_dur)
-            if not mins_m:
+            h_m   = re.fullmatch(r"(\d+)\s*h(?:ours?)?", raw_dur)
+            min_m = re.fullmatch(r"(\d+)\s*min(?:utes?)?", raw_dur)
+            if h_m:
+                mins = int(h_m.group(1)) * 60
+                dur_text = f"for *{h_m.group(1)} hours*"
+            elif min_m:
+                mins = int(min_m.group(1))
+                dur_text = f"for *{mins} minutes*"
+            else:
                 send_slack(
-                    f"Unknown duration `{m.group(4)}`. "
-                    "Use `for 5min`, `for 10min`, or `for ever`.",
+                    f"Unknown duration `{m.group(4)}`.\n"
+                    "Use `for 30min`, `for 2h`, `for 24h`, or `for ever`.",
                     thread_ts=reply_ts)
                 return
-            mins       = int(mins_m.group(1))
             expires_at = (datetime.now() + timedelta(minutes=mins)).isoformat()
-            dur_text   = f"for *{mins} minutes*"
 
         all_t = {**config.THRESHOLDS_COLD, **config.THRESHOLDS_IDLE}
         entry = all_t.get(sensor, (None, None, ""))
