@@ -12,3 +12,4 @@
 {"text": "be quiet for ever", "intent": "ack", "source": "corrected"}
 {"text": "be quiet for ever", "intent": "pause_alerts", "source": "corrected", "from_intent": "ack"}
 {"text": "open alert", "intent": "resume_alerts", "source": "corrected", "from_intent": "pause_alerts"}
+{"text": "stop", "intent": "ack", "source": "corrected", "from_intent": "pause_alerts"}
