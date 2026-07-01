@@ -410,21 +410,22 @@ def check_nlp_feedback(state: dict, conn=None):
     now = datetime.now().timestamp()
     still_pending = []
 
-    def _try_correct(input_text, correction_text, thread_ts, orig_intent, execute=True):
-        """Classify correction_text; save example + optionally execute. Returns True if understood."""
+    def _try_correct(correction_text, thread_ts, entry):
+        """Classify correction_text and propose the inferred intent for user confirmation.
+        Does NOT save or execute — waits for the user to reply 'yes'.
+        Returns True if an intent was understood."""
         correct_intent, _, c2 = classify_command(correction_text)
         if c2 > 0.25:
-            add_example(input_text, correct_intent, source="corrected", from_intent=orig_intent)
             label = INTENT_LABELS.get(correct_intent, correct_intent)
-            log.info(f"NLP correction: '{input_text}' → {correct_intent} (conf={c2:.2f})")
-            if execute and conn:
-                send_slack(f"✅ Got it — treating as *{label}* and running it now. "
-                           f"I'll remember this next time.",
-                           color="good", thread_ts=thread_ts)
-                _execute_command(correction_text, thread_ts, state, conn)
-            else:
-                send_slack(f"✅ Got it — I'll treat *\"{input_text}\"* as *{label}* next time.",
-                           color="good", thread_ts=thread_ts)
+            send_slack(
+                f"Did you mean *{label}*?\n"
+                f"Reply `yes` to confirm or `wrong` to try again.",
+                thread_ts=thread_ts)
+            entry["orig_intent"]      = entry.get("orig_intent") or entry["intent"]
+            entry["intent"]           = correct_intent
+            entry["correction_text"]  = correction_text
+            entry["awaiting_confirm"] = True
+            log.info(f"NLP proposed: '{entry['input_text']}' → {correct_intent} (conf={c2:.2f})")
             return True
         return False
 
@@ -461,21 +462,26 @@ def check_nlp_feedback(state: dict, conn=None):
 
         # ── "yes" / confirm ───────────────────────────────────────────────────
         if any(reply.startswith(w) for w in _CONFIRM_WORDS):
-            add_example(entry["input_text"], entry["intent"], source="confirmed")
+            src  = "corrected" if entry.get("orig_intent") else "confirmed"
+            add_example(entry["input_text"], entry["intent"],
+                        source=src, from_intent=entry.get("orig_intent"))
             label = INTENT_LABELS.get(entry["intent"], entry["intent"])
             send_slack(f"✅ Got it — running *{label}* now and I'll remember this next time.",
                        color="good", thread_ts=entry["user_msg_ts"])
             if conn:
-                _execute_command(entry["input_text"], entry["user_msg_ts"], state, conn)
+                run_text = entry.get("correction_text") or entry["input_text"]
+                _execute_command(run_text, entry["user_msg_ts"], state, conn)
 
         # ── "wrong" / deny ────────────────────────────────────────────────────
         elif any(w in reply for w in _DENY_WORDS):
+            # Reset awaiting_confirm so the user can give a new correction
+            entry["awaiting_confirm"] = False
+            entry["correction_text"]  = None
             stripped = re.sub(
                 r"^(?:wrong|no|nope|not right|incorrect|不对|错了)[,\s]*(?:i meant?|应该是|是)?\s*",
                 "", reply).strip()
             if stripped:
-                understood = _try_correct(entry["input_text"], stripped,
-                                          entry["user_msg_ts"], entry["intent"])
+                understood = _try_correct(stripped, entry["user_msg_ts"], entry)
                 if not understood:
                     if not entry.get("asked_correction"):
                         send_slack(
@@ -483,54 +489,30 @@ def check_nlp_feedback(state: dict, conn=None):
                             "Reply in your own words — I'll try to understand.",
                             thread_ts=entry["user_msg_ts"])
                     entry["asked_correction"] = True
-                    still_pending.append(entry)
             else:
-                # "wrong" with no inline correction — keep waiting for the next reply
+                # "wrong" with no inline correction — ask what they meant
                 if not entry.get("asked_correction"):
                     send_slack(
                         "Got it, that was wrong. What did you mean?\n"
                         "Reply in your own words — I'll try to understand.",
                         thread_ts=entry["user_msg_ts"])
                 entry["asked_correction"] = True
-                still_pending.append(entry)  # always keep pending until we get an answer
+            still_pending.append(entry)
 
-        # ── user replied to a "what did you mean?" prompt ─────────────────────
-        elif entry.get("asked_correction"):
-            understood = _try_correct(entry["input_text"], reply,
-                                      entry["user_msg_ts"], entry["intent"])
+        # ── user replied to "what did you mean?" ─────────────────────────────
+        elif entry.get("asked_correction") and not entry.get("awaiting_confirm"):
+            understood = _try_correct(reply, entry["user_msg_ts"], entry)
             if not understood:
-                # Ask once more with a concrete example list; keep entry alive
                 entry["retry_count"] = entry.get("retry_count", 0) + 1
                 if entry["retry_count"] < 2:
                     send_slack(
                         f"Still not sure what you meant by *\"{entry['input_text']}\"*.\n"
-                        "Try typing the exact command, e.g.:\n"
+                        "Try the exact command, e.g.:\n"
                         "`pump status` · `temperature reading` · `plot MXC` · `pause alerts`",
                         thread_ts=entry["user_msg_ts"])
                     still_pending.append(entry)
-                # else: drop after 2 failed retries
-
-        # ── unrecognised reply (not confirm/deny, not post-correction) ─────────
-        else:
-            correct_intent, _, c2 = classify_command(reply)
-            if c2 > 0.35 and correct_intent != entry["intent"]:
-                # Inferred intent — confirm with user before saving
-                label = INTENT_LABELS.get(correct_intent, correct_intent)
-                send_slack(
-                    f"Did you mean *{label}*? Reply `yes` to confirm or `wrong` to try again.",
-                    thread_ts=entry["user_msg_ts"])
-                entry["intent"]           = correct_intent
-                entry["asked_correction"] = True
-                still_pending.append(entry)
-                log.info(f"NLP inferred correction candidate: '{entry['input_text']}' → {correct_intent} (conf={c2:.2f})")
-            elif not entry.get("asked_correction"):
-                # Can't infer — ask what they meant
-                send_slack(
-                    "Got it, that was wrong. What did you mean?\n"
-                    "Reply in your own words — I'll try to understand.",
-                    thread_ts=entry["user_msg_ts"])
-                entry["asked_correction"] = True
-                still_pending.append(entry)
+            else:
+                still_pending.append(entry)  # understood → keep pending for yes/no
 
     state["nlp_pending"] = still_pending
 
