@@ -4,3 +4,8 @@
 {"text": "what status", "intent": "status", "source": "confirmed"}
 {"text": "change P5 IDLE mode max threshold to 800 mbar", "intent": "change_threshold", "source": "confirmed"}
 {"text": "check 4k", "intent": "pump_status", "source": "confirmed"}
+{"text": "be quiet for ever", "intent": "pause_alerts", "source": "corrected", "from_intent": "ack"}
+{"text": "stop alert", "intent": "pause_alerts", "source": "confirmed"}
+{"text": "be quiet for ever", "intent": "ack", "source": "corrected", "from_intent": "pause_alerts"}
+{"text": "silence for ten min", "intent": "ack", "source": "confirmed"}
+{"text": "be quiet for ever", "intent": "pause_alerts", "source": "corrected", "from_intent": "ack"}
