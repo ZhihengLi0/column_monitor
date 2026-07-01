@@ -7,6 +7,8 @@ Self-learning: user corrections are saved to nlp_user_examples.jsonl and trigger
 import re
 import json
 import logging
+import subprocess
+import threading
 from pathlib import Path
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -405,8 +407,35 @@ def _load_user_examples():
     return examples
 
 
+def _git_push_learned(text: str, intent: str, source: str, from_intent: str = None) -> None:
+    """Commit and push nlp_user_examples.jsonl in a background thread."""
+    label      = INTENT_LABELS.get(intent, intent)
+    from_label = INTENT_LABELS.get(from_intent, from_intent) if from_intent else None
+    if source == "corrected" and from_label:
+        msg = f'NLP: corrected "{text[:60]}" — was [{from_label}], now [{label}]'
+    elif source == "confirmed":
+        msg = f'NLP: confirmed "{text[:60]}" → [{label}]'
+    else:
+        msg = f'NLP: learned "{text[:60]}" → [{label}] [{source}]'
+    full_msg = msg + "\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
+    repo = str(USER_EXAMPLES_FILE.parent)
+    try:
+        subprocess.run(["git", "add", "nlp_user_examples.jsonl"], cwd=repo, check=True,
+                       capture_output=True)
+        result = subprocess.run(["git", "commit", "-m", full_msg], cwd=repo,
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True,
+                           capture_output=True)
+            log.info(f"NLP: synced to GitHub — {msg}")
+        else:
+            log.debug("NLP: nothing new to commit to GitHub")
+    except Exception as e:
+        log.error(f"NLP: GitHub sync failed: {e}")
+
+
 def add_example(text: str, intent: str, source: str = "user", from_intent: str = None) -> None:
-    """Persist a new labeled example and invalidate the classifier cache for rebuild."""
+    """Persist a new labeled example, invalidate classifier cache, and sync to GitHub."""
     try:
         entry = {"text": text, "intent": intent, "source": source}
         if from_intent and from_intent != intent:
@@ -415,6 +444,9 @@ def add_example(text: str, intent: str, source: str = "user", from_intent: str =
             f.write(json.dumps(entry) + "\n")
         _classifier._pipeline = None  # trigger rebuild on next call
         log.info(f"NLP: learned '{text[:60]}' → {intent} [{source}]")
+        threading.Thread(target=_git_push_learned,
+                         args=(text, intent, source, from_intent),
+                         daemon=True).start()
     except Exception as e:
         log.error(f"NLP: failed to save example: {e}")
 
