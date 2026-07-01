@@ -396,7 +396,7 @@ def check_acknowledgements(state: dict):
 _CONFIRM_WORDS = {"yes", "correct", "right", "yep", "yeah", "yup", "对", "是", "是的", "对的"}
 _DENY_WORDS    = {"wrong", "no", "nope", "not right", "incorrect", "不对", "错", "错了", "不是"}
 
-def check_nlp_feedback(state: dict):
+def check_nlp_feedback(state: dict, conn=None):
     """Poll thread replies to recent NLP responses; learn from corrections."""
     pending = state.get("nlp_pending", [])
     if not pending:
@@ -409,6 +409,24 @@ def check_nlp_feedback(state: dict):
 
     now = datetime.now().timestamp()
     still_pending = []
+
+    def _try_correct(input_text, correction_text, thread_ts, orig_intent, execute=True):
+        """Classify correction_text; save example + optionally execute. Returns True if understood."""
+        correct_intent, _, c2 = classify_command(correction_text)
+        if c2 > 0.25:
+            add_example(input_text, correct_intent, source="corrected")
+            label = INTENT_LABELS.get(correct_intent, correct_intent)
+            log.info(f"NLP correction: '{input_text}' → {correct_intent} (conf={c2:.2f})")
+            if execute and conn:
+                send_slack(f"✅ Got it — treating as *{label}* and running it now. "
+                           f"I'll remember this next time.",
+                           color="good", thread_ts=thread_ts)
+                _execute_command(correction_text, thread_ts, state, conn)
+            else:
+                send_slack(f"✅ Got it — I'll treat *\"{input_text}\"* as *{label}* next time.",
+                           color="good", thread_ts=thread_ts)
+            return True
+        return False
 
     for entry in pending:
         # Expire after 10 minutes
@@ -433,55 +451,56 @@ def check_nlp_feedback(state: dict):
             still_pending.append(entry)
             continue
 
-        raw  = user_replies[-1].get("text", "").strip()
+        raw   = user_replies[-1].get("text", "").strip()
         reply = re.sub(r"<@[A-Z0-9]+>", "", raw).strip().lower()
 
+        # ── "yes" / confirm ───────────────────────────────────────────────────
         if any(reply.startswith(w) for w in _CONFIRM_WORDS):
             add_example(entry["input_text"], entry["intent"], source="confirmed")
             send_slack("✅ Got it — I'll remember that phrasing next time.",
                        color="good", thread_ts=entry["user_msg_ts"])
 
+        # ── "wrong" / deny ────────────────────────────────────────────────────
         elif any(w in reply for w in _DENY_WORDS):
-            # Try to parse the correct intent from the denial message
-            # e.g. "wrong, I meant pump status"  or  "not right, heater status"
             stripped = re.sub(
                 r"^(?:wrong|no|nope|not right|incorrect|不对|错了)[,\s]*(?:i meant?|应该是|是)?\s*",
                 "", reply).strip()
             if stripped:
-                correct_intent, _, c2 = classify_command(stripped)
-                if c2 > 0.25 and correct_intent != entry["intent"]:
-                    add_example(entry["input_text"], correct_intent, source="corrected")
-                    label = INTENT_LABELS.get(correct_intent, correct_intent)
+                understood = _try_correct(entry["input_text"], stripped,
+                                          entry["user_msg_ts"], entry["intent"])
+                if not understood and not entry.get("asked_correction"):
                     send_slack(
-                        f"✅ Got it — I'll treat that as *{label}* next time.",
-                        color="good", thread_ts=entry["user_msg_ts"])
-                else:
-                    if not entry.get("asked_correction"):
-                        intents_list = "\n".join(
-                            f"• `{v}`" for v in INTENT_LABELS.values())
-                        send_slack(
-                            f"Understood, I got that wrong. What did you mean?\n"
-                            f"Reply with the correct action — for example:\n{intents_list}",
-                            thread_ts=entry["user_msg_ts"])
-                        entry["asked_correction"] = True
-                        still_pending.append(entry)
+                        "Got it, that was wrong. What did you mean?\n"
+                        "Reply in your own words — I'll try to understand.",
+                        thread_ts=entry["user_msg_ts"])
+                    entry["asked_correction"] = True
+                    still_pending.append(entry)
             else:
                 if not entry.get("asked_correction"):
                     send_slack(
                         "Got it, that was wrong. What did you mean?\n"
-                        "Reply with the correct command "
-                        "(e.g. `pump status`, `plot P2`, `heater status`, `daily summary`)",
+                        "Reply in your own words — I'll try to understand.",
                         thread_ts=entry["user_msg_ts"])
                     entry["asked_correction"] = True
                     still_pending.append(entry)
 
+        # ── user replied to a "what did you mean?" prompt ─────────────────────
+        elif entry.get("asked_correction"):
+            understood = _try_correct(entry["input_text"], reply,
+                                      entry["user_msg_ts"], entry["intent"])
+            if not understood:
+                send_slack(
+                    "Sorry, I still don't understand. Try typing the exact command, e.g.:\n"
+                    "`pump status` · `temperature reading` · `plot MXC` · `pressure reading`",
+                    thread_ts=entry["user_msg_ts"])
+                # Drop — don't keep asking
+
+        # ── unrecognised reply (not confirm/deny, not post-correction) ─────────
         else:
-            # User replied with something else — try to infer correct intent
             correct_intent, _, c2 = classify_command(reply)
             if c2 > 0.35 and correct_intent != entry["intent"]:
                 add_example(entry["input_text"], correct_intent, source="inferred")
                 log.info(f"NLP inferred correction: '{entry['input_text']}' → {correct_intent}")
-            # Don't keep nagging — drop from pending
 
     state["nlp_pending"] = still_pending
 
@@ -489,7 +508,7 @@ def check_nlp_feedback(state: dict):
 # ── Slack polling: commands ───────────────────────────────────────────────────
 
 def check_commands(state: dict, conn=None):
-    check_nlp_feedback(state)
+    check_nlp_feedback(state, conn)
     last_ts = state.get("last_slack_ts", "0")
     data = slack_get("conversations.history",
                      {"channel": config.SLACK_CHANNEL, "oldest": last_ts, "limit": 50})
