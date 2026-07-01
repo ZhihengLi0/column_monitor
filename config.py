@@ -1,14 +1,19 @@
 # BlueFors Monitor Configuration
 
+# ── Secrets (loaded from config_secret.py on the local machine) ───────────────
+try:
+    from config_secret import LOCAL_PG_PASSWORD, SLACK_BOT_TOKEN
+except ImportError:
+    LOCAL_PG_PASSWORD = "YOUR_PG_PASSWORD"
+    SLACK_BOT_TOKEN   = "YOUR_SLACK_BOT_TOKEN"
+
 # ── Local PostgreSQL (Raspberry Pi) ───────────────────────────────────────────
-LOCAL_PG_HOST     = "localhost"
-LOCAL_PG_PORT     = 5432
-LOCAL_PG_USER     = "postgres"
-LOCAL_PG_PASSWORD = "cs2monitor"
-LOCAL_PG_DB       = "cs2"
+LOCAL_PG_HOST = "localhost"
+LOCAL_PG_PORT = 5432
+LOCAL_PG_USER = "postgres"
+LOCAL_PG_DB   = "cs2"
 
 # ── Slack ─────────────────────────────────────────────────────────────────────
-SLACK_BOT_TOKEN   = "YOUR_SLACK_BOT_TOKEN"
 SLACK_CHANNEL     = "C0B42G4AU0N"
 SLACK_BOT_USER_ID = "U0BBGRB0HC4"
 
@@ -30,10 +35,14 @@ MODE_COLD_BELOW_K     = 80.0    # K — below this the 50K plate is stabilised, 
 # Check that pressures and other values are reasonable while the system sits idle.
 # Temperatures are NOT checked here — they are expected to be near room temperature.
 THRESHOLDS_IDLE = {
-    # sensor mapping      : (max_value, min_value, description)
+    # sensor mapping  : (max_value, min_value, description)
+    # 4-element tuple : (max_value, min_value, max_desc, min_desc)
     # Database stores pressure in bar; thresholds are in bar (1 mbar = 0.001 bar)
-    "P2_PRESSURE":  (0.01,   None, "P2 pressure unusually high at room temperature (> 10 mbar)"),
-    "P5_PRESSURE":  (1e-4,   None, "P5 pressure unusually high at room temperature (> 0.1 mbar)"),
+    "P2_PRESSURE":  (0.01,  None, "P2 pressure unusually high at room temperature (> 10 mbar)"),
+    "P5_PRESSURE":  (1e-4,  None, "P5 pressure unusually high at room temperature (> 0.1 mbar)"),
+    "P1_PRESSURE":  (None,  1e-5,
+                    None,
+                    "P1 pressure < 0.01 mbar at room temperature — possible leak, please perform a leak check"),
 }
 
 # ── Thresholds: COLD mode (fridge operational, base temperature) ───────────────
