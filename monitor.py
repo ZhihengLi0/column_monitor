@@ -441,18 +441,23 @@ def check_nlp_feedback(state: dict, conn=None):
 
         msgs = data.get("messages", [])
         bot_ts = entry.get("bot_msg_ts") or entry["user_msg_ts"]
-        # Only look at user replies AFTER the bot's hint message
+        # Only look at user replies AFTER the last message we processed
+        # (use last_seen_ts so we don't re-process messages from previous polls)
+        since_ts = entry.get("last_seen_ts") or bot_ts
         user_replies = [
             m for m in msgs[1:]
-            if m.get("ts", "0") > bot_ts
+            if m.get("ts", "0") > since_ts
             and m.get("user") != config.SLACK_BOT_USER_ID
         ]
         if not user_replies:
             still_pending.append(entry)
             continue
 
-        raw   = user_replies[-1].get("text", "").strip()
-        reply = re.sub(r"<@[A-Z0-9]+>", "", raw).strip().lower()
+        # Process the earliest unprocessed reply, not the latest
+        next_msg  = user_replies[0]
+        raw       = next_msg.get("text", "").strip()
+        reply     = re.sub(r"<@[A-Z0-9]+>", "", raw).strip().lower()
+        entry["last_seen_ts"] = next_msg["ts"]
 
         # ── "yes" / confirm ───────────────────────────────────────────────────
         if any(reply.startswith(w) for w in _CONFIRM_WORDS):
@@ -471,21 +476,23 @@ def check_nlp_feedback(state: dict, conn=None):
             if stripped:
                 understood = _try_correct(entry["input_text"], stripped,
                                           entry["user_msg_ts"], entry["intent"])
-                if not understood and not entry.get("asked_correction"):
-                    send_slack(
-                        "Got it, that was wrong. What did you mean?\n"
-                        "Reply in your own words — I'll try to understand.",
-                        thread_ts=entry["user_msg_ts"])
+                if not understood:
+                    if not entry.get("asked_correction"):
+                        send_slack(
+                            "Got it, that was wrong. What did you mean?\n"
+                            "Reply in your own words — I'll try to understand.",
+                            thread_ts=entry["user_msg_ts"])
                     entry["asked_correction"] = True
                     still_pending.append(entry)
             else:
+                # "wrong" with no inline correction — keep waiting for the next reply
                 if not entry.get("asked_correction"):
                     send_slack(
                         "Got it, that was wrong. What did you mean?\n"
                         "Reply in your own words — I'll try to understand.",
                         thread_ts=entry["user_msg_ts"])
-                    entry["asked_correction"] = True
-                    still_pending.append(entry)
+                entry["asked_correction"] = True
+                still_pending.append(entry)  # always keep pending until we get an answer
 
         # ── user replied to a "what did you mean?" prompt ─────────────────────
         elif entry.get("asked_correction"):
