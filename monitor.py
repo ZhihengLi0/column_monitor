@@ -558,8 +558,37 @@ def _unescape_slack(text: str) -> str:
     return text.strip()
 
 
+_DENY_STANDALONE = re.compile(
+    r"^(?:wrong|incorrect|not right|that(?:'s| was| is) wrong|不对|错了|不是这个意思)$"
+)
+
 def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: str = "default"):
     lower = _unescape_slack(text).lower().strip()
+
+    # ── "wrong" on its own → correct the most recent NLP command ─────────────
+    if _DENY_STANDALONE.match(lower):
+        last = state.get("last_nlp_command")
+        if last and (datetime.now().timestamp() - last.get("ts", 0)) < 600:
+            send_slack(
+                f"Got it, *\"{last['input_text']}\"* was wrong. What did you mean?\n"
+                "Reply in your own words — I'll try to understand.",
+                thread_ts=reply_ts)
+            entry = {
+                "input_text":       last["input_text"],
+                "intent":           last["intent"],
+                "conf":             last["conf"],
+                "user_msg_ts":      reply_ts,
+                "bot_msg_ts":       reply_ts,
+                "created":          datetime.now().timestamp(),
+                "asked_correction": True,
+                "last_seen_ts":     reply_ts,
+            }
+            state.setdefault("nlp_pending", []).append(entry)
+            state["nlp_pending"] = state["nlp_pending"][-20:]
+        else:
+            send_slack("No recent command to correct — what would you like to do?",
+                       thread_ts=reply_ts)
+        return
 
     # ── Context memory (10-minute window) ────────────────────────────────────
     ctx = state.get("ctx", {})
@@ -994,9 +1023,15 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
                 thread_ts=reply_ts)
             return
 
-        # ── Append confidence hint and store for feedback tracking ───────────
-        # For uncertain predictions, tell the user what we guessed so they can
-        # correct it by replying "wrong, I meant pump status" in the thread.
+        # ── Always record last NLP command so "wrong" can reference it ──────
+        state["last_nlp_command"] = {
+            "input_text": text,
+            "intent":     intent,
+            "conf":       conf,
+            "ts":         datetime.now().timestamp(),
+        }
+
+        # ── For uncertain predictions, send hint and track for feedback ───────
         if conf < 0.45:
             label = INTENT_LABELS.get(intent, intent)
             hint_ts = send_slack(
@@ -1005,7 +1040,6 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
                 color="#888888", thread_ts=reply_ts)
             _nlp_track["bot_msg_ts"] = hint_ts or reply_ts
             state.setdefault("nlp_pending", []).append(_nlp_track)
-            # Keep only last 20 pending entries
             state["nlp_pending"] = state["nlp_pending"][-20:]
 
     except Exception as e:
