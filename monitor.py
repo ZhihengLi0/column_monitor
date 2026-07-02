@@ -163,9 +163,10 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    tmp = STATE_FILE.with_suffix(".tmp")
+    import os
+    tmp = STATE_FILE.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(state, default=str, indent=2))
-    tmp.replace(STATE_FILE)  # atomic: never leaves the file half-written
+    tmp.replace(STATE_FILE)  # atomic rename; PID suffix avoids collision between processes
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 
