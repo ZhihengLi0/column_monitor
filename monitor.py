@@ -1892,6 +1892,8 @@ HEATER_MAPPINGS = [
 # Additional devices monitored for state-change alerts (not shown in heater status)
 DEVICE_ALERT_MAPPINGS = HEATER_MAPPINGS + [
     ("PULSE_TUBE_ENABLED", "Pulse Tube"),
+    ("B1A_ENABLED",        "B1A Turbo Pump"),
+    ("B2_ENABLED",         "B2 Turbo Pump"),
 ]
 
 # Devices that MUST stay ON while the fridge is cooling down / warming up.
