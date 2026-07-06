@@ -21,6 +21,7 @@ Slack commands (@BlueFors-Alert <command>):
   set mode idle                     force IDLE mode
   set mode cold                     force COLD mode
   ack                               silence ALL sensor alerts 10 min
+  (reply in an alert thread)        "silent for 2h" / "mute 30min" / "silence 3 days" / "silent forever"
   change <sensor> to <val> for 5min / 10min / ever
   reset <sensor>
 """
@@ -373,36 +374,139 @@ def get_threshold(name: str, state: dict):
     entry = thresholds.get(name, (None, None, ""))
     return entry[0], entry[1]
 
+# ── Duration parsing (shared: silence, threshold overrides, plots) ────────────
+
+# A number followed by a unit: days / hours / minutes (English or Chinese).
+_DURATION_TOKEN_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*"
+    r"(days?|d|hours?|hrs?|hr|h|minutes?|mins?|min|m|"
+    r"天|日|小时|钟头|时|分钟|分)",
+    re.I,
+)
+# Words meaning "no expiry".
+_FOREVER_RE = re.compile(
+    r"(ever|forever|permanent(?:ly)?|indefinit\w*|always|"
+    r"永久|永远|一直|长期)",
+    re.I,
+)
+# Far-future sentinel stored for permanent silence, so every
+# `fromisoformat(t) > now` check throughout the code keeps working.
+FOREVER_TS = datetime.max.isoformat()
+
+
+def parse_duration(text: str):
+    """Parse a duration phrase.
+
+    Returns:
+      (minutes: float, label: str)  finite duration, e.g. (120.0, "2 hours")
+      (None,          "permanently") for 'ever'/'forever'/'permanent'
+      None                           if no duration is present
+    """
+    if _FOREVER_RE.search(text):
+        return (None, "permanently")
+    m = _DURATION_TOKEN_RE.search(text)
+    if not m:
+        return None
+    val  = float(m.group(1))
+    unit = m.group(2).lower()
+    if unit.startswith("d") or unit in ("天", "日"):
+        mins, word = val * 1440, "day"
+    elif unit.startswith("h") or unit in ("小时", "钟头", "时"):
+        mins, word = val * 60, "hour"
+    else:
+        mins, word = val, "minute"
+    label = f"{val:g} {word}{'' if val == 1 else 's'}"
+    return (mins, label)
+
+
 # ── Slack polling: acks ───────────────────────────────────────────────────────
+
+# Words in an alert thread that mean "stop notifying me about this sensor".
+_SILENCE_RE = re.compile(
+    r"\b(silent|silence|mute|quiet|snooze|hush|ignore|ack|acknowledge)\b|"
+    r"静音|安静|消音|别响|闭嘴|忽略",
+    re.I,
+)
+
+
+def _silence_request(text: str):
+    """Given an alert-thread reply, decide whether it asks to silence the
+    sensor and for how long. Returns (expires_at_iso, label) or None.
+
+    Accepted forms:
+      "ok"                        → 10 minutes (legacy default)
+      "silent for 2h"             → 2 hours
+      "mute 30 min" / "静音3天"    → parsed duration
+      "silence forever"           → permanent
+      a bare duration like "2h"   → parsed duration
+    """
+    low = _unescape_slack(text).strip().lower()
+    if not low:
+        return None
+
+    parsed = parse_duration(low)
+    has_kw = bool(_SILENCE_RE.search(low))
+
+    if low in ("ok", "okay", "k"):
+        expires = (datetime.now() + timedelta(minutes=10)).isoformat()
+        return (expires, "10 minutes")
+
+    # A silence keyword, or a reply that is essentially just a duration.
+    core = re.sub(r"\b(for|please|pls|thanks?|thx|the|alert)\b", " ", low).strip(" .,!，。")
+    core = re.sub(r"\s+", " ", core)
+    pure_duration = bool(
+        _FOREVER_RE.fullmatch(core)
+        or re.fullmatch(r"\d+(?:\.\d+)?\s*\S+", core) and parsed is not None
+    )
+    if not (has_kw or pure_duration):
+        return None
+
+    if parsed is None:
+        # keyword present but no duration given → default 10 minutes
+        expires = (datetime.now() + timedelta(minutes=10)).isoformat()
+        return (expires, "10 minutes")
+    mins, label = parsed
+    if mins is None:                 # "forever"
+        return (FOREVER_TS, "permanently")
+    return ((datetime.now() + timedelta(minutes=mins)).isoformat(), label)
+
 
 def check_acknowledgements(state: dict):
     pending   = state.setdefault("pending_alert_msgs", {})
     acked     = state.setdefault("acked_sensors", {})
-    ack_until = (datetime.now() + timedelta(minutes=10)).isoformat()
 
     for sensor in list(pending.keys()):
         ch = pending[sensor]["channel"]
         ts = pending[sensor]["ts"]
-        found = False
+        silence = None   # (expires_at_iso, label)
 
+        # 1. Emoji reaction → default 10-minute silence
         data = slack_get("reactions.get", {"channel": ch, "timestamp": ts})
         if data.get("ok"):
             rxns = data.get("message", {}).get("reactions", [])
             if any(r["name"] in ACK_REACTIONS for r in rxns):
-                found = True
+                silence = ((datetime.now() + timedelta(minutes=10)).isoformat(), "10 minutes")
 
-        if not found:
+        # 2. Thread reply → "ok" / "silent for <duration>" / bare duration
+        if silence is None:
             data = slack_get("conversations.replies", {"channel": ch, "ts": ts})
             if data.get("ok"):
                 for reply in data.get("messages", [])[1:]:
-                    if reply.get("text", "").strip().lower() == "ok":
-                        found = True
+                    if reply.get("user") == config.SLACK_BOT_USER_ID:
+                        continue
+                    req = _silence_request(reply.get("text", ""))
+                    if req:
+                        silence = req
                         break
 
-        if found:
-            acked[sensor] = ack_until
+        if silence:
+            expires, label = silence
+            acked[sensor] = expires
             del pending[sensor]
-            log.info(f"{sensor} acknowledged — silenced 10 min")
+            when = "permanently" if label == "permanently" else f"for *{label}*"
+            send_slack(f"🔕 Okay, silencing *{sensor}* {when}.",
+                       color="good", thread_ts=ts)
+            log.info(f"{sensor} silenced ({label})")
 
 # ── NLP self-learning: check thread replies for corrections ───────────────────
 
@@ -1583,7 +1687,8 @@ def _cmd_status(state: dict, reply_ts=None):
     if active_acks:
         lines.append("\n*Silenced sensors:*")
         for s, until in active_acks.items():
-            lines.append(f"  • `{s}` until `{until[:16]}`")
+            when = "permanently" if until.startswith("9999") else f"until `{until[:16]}`"
+            lines.append(f"  • `{s}` {when}")
 
     send_slack("\n".join(lines), color="#0066cc", thread_ts=reply_ts)
 
