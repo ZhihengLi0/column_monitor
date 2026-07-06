@@ -974,17 +974,23 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
         _cmd_status(state, reply_ts)
         return
 
-    # What alarms are configured? (optionally scoped to one mode)
+    # What alarms are configured, and what triggers them? (optionally scoped)
     #   "what is the alarm", "list alarms", "alarm in cold mode",
-    #   "alarms cold", "cold模式有什么报警", "what alerts in idle", ...
+    #   "alarm criteria", "what is current alarm criteria", "当前报警条件", ...
     # No \b around the alarm word — it fails when a Chinese char is adjacent.
     _alarm_word = re.search(r"alarms?|alerts?|报警|警报", lower)
     _query_word = re.search(r"\b(what|which|list|show|display|tell)\b"
                             r"|有什么|哪些|什么|列出|有哪些|告诉", lower)
+    _crit_word  = re.search(r"criteri|trigger|condition|条件|标准|触发", lower)
+    _cur_word   = re.search(r"\bcurrent(?:ly)?\b|\bnow\b|当前|现在|目前", lower)
     _alarm_mode = _mode_in_text(lower)
-    _bare       = lower.strip() in ("alarms", "alarm", "alarm list", "alarm listing")
-    if _alarm_word and (_query_word or _alarm_mode or _bare):
-        _cmd_list_alarms(state, reply_ts, only_mode=_alarm_mode)
+    _bare       = lower.strip() in ("alarms", "alarm", "alarm list", "alarm listing",
+                                    "alarm criteria", "alarm criterion")
+    if _alarm_word and (_query_word or _alarm_mode or _bare or _crit_word or _cur_word):
+        only = _alarm_mode
+        if only is None and _cur_word:      # "current" → the current operating mode
+            only = state.get("current_mode")
+        _cmd_list_alarms(state, reply_ts, only_mode=only)
         return
 
     # ── Chilled water filter ──────────────────────────────────────────────────
@@ -1790,7 +1796,8 @@ def _cmd_help(reply_ts=None):
         "`set mode cold` — force COLD mode (operational monitoring)\n"
         "`set mode transitioning` — force TRANSITIONING mode (cooling/warming — threshold alerts off)\n"
         "`list` — sensor numbers, short names, current thresholds\n"
-        "`what is the alarm` — list every configured alarm, grouped by mode\n"
+        "`what is the alarm` — list every configured alarm + its trigger criteria, grouped by mode\n"
+        "`what is current alarm criteria` — trigger criteria for the *current* mode only\n"
         "`what alarms in cold mode` — list alarms for one mode (idle/cold/transitioning)\n"
         "`filter status` — days until the chilled water filter is due for replacement\n"
         "`I have changed the filter` — confirm filter replaced, restart the 3-week timer\n"
