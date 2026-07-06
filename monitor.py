@@ -541,6 +541,100 @@ def check_acknowledgements(state: dict):
                        color="good", thread_ts=ts)
             log.info(f"{sensor} silenced ({label})")
 
+
+# ── Chilled water filter replacement reminder ─────────────────────────────────
+
+# Phrases meaning "the filter has been replaced". NOTE: 'ok' / 'yes' do NOT count.
+_FILTER_DONE_RE = re.compile(
+    r"i\s*'?(?:ve|have)?\s*(?:just|already)?\s*(?:changed|replaced|swapped|renewed|done)"
+    r"|(?:changed|replaced|swapped|renewed)\s*(?:it|the)?\s*(?:filter)?"
+    r"|filter\s*(?:is\s*)?(?:changed|replaced|swapped|renewed|done|new)"
+    r"|已经?(?:更换|换了|替换|换好)|换好了|换了新的?|更换完成|已换|换过了",
+    re.IGNORECASE,
+)
+# For the @mention command path we additionally require the word "filter"
+# so "I changed the threshold" can't reset the timer by accident.
+_FILTER_WORD_RE = re.compile(r"filter|滤芯|滤网|滤器|过滤", re.IGNORECASE)
+
+
+def _filter_state(state: dict) -> dict:
+    f = state.get("filter")
+    if not f:
+        f = {
+            "next_due": (datetime.now()
+                         + timedelta(days=config.FILTER_INTERVAL_DAYS)).isoformat(),
+            "active": False,
+            "last_reminded": None,
+            "reminder_ts": None,
+        }
+        state["filter"] = f
+    return f
+
+
+def reset_filter_timer(state: dict, reply_ts: str = None, announce: bool = True) -> None:
+    """Mark the filter as freshly replaced and restart the countdown."""
+    f = _filter_state(state)
+    f["next_due"]      = (datetime.now()
+                          + timedelta(days=config.FILTER_INTERVAL_DAYS)).isoformat()
+    f["active"]        = False
+    f["last_reminded"] = None
+    f["reminder_ts"]   = None
+    if announce:
+        send_slack(
+            ":white_check_mark: *Chilled water filter marked as replaced — thanks!*\n"
+            f"Next replacement reminder in *{config.FILTER_INTERVAL_DAYS} days* "
+            f"(around *{f['next_due'][:10]}*).",
+            color="good", thread_ts=reply_ts)
+    log.info(f"Filter timer reset — next due {f['next_due']}")
+
+
+def check_filter_reminder(state: dict) -> None:
+    """Every FILTER_INTERVAL_DAYS the chilled water filter must be replaced.
+    Once due, remind every FILTER_REMINDER_INTERVAL_MIN minutes (in one thread)
+    until someone replies that it was changed. Runs independently of alert
+    pausing/acking — only an explicit 'I have changed it' stops it."""
+    f   = _filter_state(state)
+    now = datetime.now()
+
+    if not f["active"]:
+        if now >= datetime.fromisoformat(f["next_due"]):
+            f["active"]        = True
+            f["last_reminded"] = None
+            f["reminder_ts"]   = None
+        else:
+            return
+
+    # Active — first, look for a confirmation reply in the reminder thread.
+    if f.get("reminder_ts"):
+        data = slack_get("conversations.replies",
+                         {"channel": config.SLACK_CHANNEL, "ts": f["reminder_ts"]})
+        if data.get("ok"):
+            for reply in data.get("messages", [])[1:]:
+                if reply.get("user") == config.SLACK_BOT_USER_ID:
+                    continue
+                if _FILTER_DONE_RE.search(_unescape_slack(reply.get("text", "")).lower()):
+                    reset_filter_timer(state, reply_ts=f["reminder_ts"])
+                    return
+
+    # Still due — send a reminder every FILTER_REMINDER_INTERVAL_MIN minutes.
+    last = f.get("last_reminded")
+    if last and (now - datetime.fromisoformat(last)) < timedelta(
+            minutes=config.FILTER_REMINDER_INTERVAL_MIN):
+        return
+
+    msg = (":droplet: *Chilled water filter — replacement due*\n"
+           f"It has been {config.FILTER_INTERVAL_DAYS} days since the last change. "
+           "*Please replace the chilled water filter.*\n"
+           "_Please reply `I have changed it` (or `filter replaced`) in this thread "
+           "*after you have changed it*. I'll keep reminding every "
+           f"{config.FILTER_REMINDER_INTERVAL_MIN} minutes until then — "
+           "replying `ok` will *not* stop it._")
+    ts = send_slack(msg, color="warning", thread_ts=f.get("reminder_ts"))
+    f["last_reminded"] = now.isoformat()
+    if not f.get("reminder_ts") and ts:
+        f["reminder_ts"] = ts   # anchor all follow-up reminders in this one thread
+
+
 # ── NLP self-learning: check thread replies for corrections ───────────────────
 
 _CONFIRM_RE = re.compile(
@@ -892,6 +986,26 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
     if _alarm_word and (_query_word or _alarm_mode or _bare):
         _cmd_list_alarms(state, reply_ts, only_mode=_alarm_mode)
         return
+
+    # ── Chilled water filter ──────────────────────────────────────────────────
+    if _FILTER_WORD_RE.search(lower):
+        # "I have changed the filter" / "filter replaced" → reset the countdown
+        if _FILTER_DONE_RE.search(lower):
+            reset_filter_timer(state, reply_ts=reply_ts)
+            return
+        # "filter status" / "filter" → how long until the next replacement
+        if re.fullmatch(r"(chilled\s+water\s+)?filter(\s+status)?|滤芯状态|过滤器状态", lower):
+            f   = _filter_state(state)
+            due = datetime.fromisoformat(f["next_due"])
+            days_left = (due - datetime.now()).total_seconds() / 86400
+            if f.get("active"):
+                body = (":droplet: *Chilled water filter is DUE for replacement.*\n"
+                        "Reply `I have changed it` in the reminder thread once done.")
+            else:
+                body = (f":droplet: *Chilled water filter* — next replacement in "
+                        f"*{days_left:.1f} days* (around *{f['next_due'][:10]}*).")
+            send_slack(body, color="#0066cc", thread_ts=reply_ts)
+            return
 
     # set mode auto / idle / cold / transitioning
     m = re.fullmatch(r"set\s+mode\s+(\S+)", text, re.IGNORECASE)
@@ -1678,6 +1792,8 @@ def _cmd_help(reply_ts=None):
         "`list` — sensor numbers, short names, current thresholds\n"
         "`what is the alarm` — list every configured alarm, grouped by mode\n"
         "`what alarms in cold mode` — list alarms for one mode (idle/cold/transitioning)\n"
+        "`filter status` — days until the chilled water filter is due for replacement\n"
+        "`I have changed the filter` — confirm filter replaced, restart the 3-week timer\n"
         "`status` — active overrides and silenced sensors\n"
         "`ack` — silence ALL sensors for 10 min\n"
         "`(reply under an alert)` `silent for 2h` / `mute 30min` / `silence 3 days` / `silent forever` — snooze that one sensor\n"
@@ -2495,6 +2611,9 @@ def run():
 
         # 2. Detect / update operating mode
         update_mode(conn, state)
+
+        # Maintenance: chilled water filter reminder (independent of pause/ack)
+        check_filter_reminder(state)
 
         # 3. Run checks
         all_alerts = []

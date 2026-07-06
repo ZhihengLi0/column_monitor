@@ -74,5 +74,12 @@ ALERT_COOLDOWN_MINUTES = 30
 # Minimum CS2 alert severity to forward to Slack (1 = warning, 2 = error only)
 CS2_ALERT_MIN_SEVERITY = 2
 
+# ── Chilled water filter replacement reminder ──────────────────────────────────
+# Remind to replace the chilled water filter every N days (3 weeks = 21 days).
+# Once due, nag every FILTER_REMINDER_INTERVAL_MIN minutes until someone confirms
+# it was replaced (e.g. "I have changed it"). "ok" does NOT count as confirmation.
+FILTER_INTERVAL_DAYS         = 21
+FILTER_REMINDER_INTERVAL_MIN = 10
+
 # Sync batch size (rows per table per sync cycle, Windows side)
 SYNC_BATCH_SIZE = 5000
