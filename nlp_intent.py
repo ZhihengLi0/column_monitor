@@ -496,8 +496,8 @@ _classifier = IntentClassifier()
 
 # Sensor keywords — use (?<!\d) / (?!\d) instead of \b so Chinese chars don't break matching
 _SENSOR_PATTERNS = [
-    (r"mxc[\s_]?far|mxcfar",                   "MXC_TEMPERATURE_FAR"),
-    (r"mxc(?![a-z0-9])|mxc温度",               "MXC_TEMPERATURE"),
+    (r"mxc[\s_]?far|mxcfar|(?<![a-z0-9])mc[\s_]?far",   "MXC_TEMPERATURE_FAR"),
+    (r"mxc(?![a-z0-9])|mxc温度|(?<![a-z0-9])mc(?![a-z0-9])|mixing\s*chamber|混合室",  "MXC_TEMPERATURE"),
     (r"still(?![a-z0-9])|still温度",           "STILL_TEMPERATURE"),
     (r"(?<![0-9])4k(?![a-z0-9])|4k板",         "4K_TEMPERATURE"),
     (r"50k(?![a-z0-9])|50k板",                 "50K_TEMPERATURE"),

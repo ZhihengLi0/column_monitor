@@ -130,6 +130,9 @@ for _i, (_full, _short, _) in enumerate(SENSOR_LIST_COLD, 1):
 for _full, _short, _ in SENSOR_LIST_IDLE:
     SENSOR_LOOKUP[_short.upper()] = _full
     SENSOR_LOOKUP[_full.upper()]  = _full
+# Common alias: "MC" (mixing chamber) means MXC
+SENSOR_LOOKUP["MC"]    = "MXC_TEMPERATURE"
+SENSOR_LOOKUP["MCFAR"] = "MXC_TEMPERATURE_FAR"
 
 UNITS = {
     "MXC_TEMPERATURE": "K",    "MXC_TEMPERATURE_FAR": "K",
@@ -782,14 +785,20 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
         tokens = lower.split()[1:]   # everything after "plot"
         sensor_keys, time_tokens, minutes = [], [], 30
         log.info(f"Plot parser: raw_text={repr(text)!r} lower={repr(lower)!r} tokens={tokens}")
+
+        def _plot_key(tok: str):
+            """Map a token to a PLOT_SENSORS key, honouring aliases (mc→MXC)."""
+            k = PLOT_SENSOR_ALIASES.get(tok.upper(), tok.upper())
+            return k if k in PLOT_SENSORS else None
+
         for tok in tokens:
             if _TIME_PAT_RE.fullmatch(tok):
                 time_tokens.append(tok)
-            elif tok.upper() in PLOT_SENSORS:
-                sensor_keys.append(tok.upper())
+            elif _plot_key(tok):
+                sensor_keys.append(_plot_key(tok))
         # Duration: search across full token string to handle "recent 2 hours", "2h", etc.
         remaining = " ".join(t for t in tokens
-                             if t.upper() not in PLOT_SENSORS and not _TIME_PAT_RE.fullmatch(t))
+                             if not _plot_key(t) and not _TIME_PAT_RE.fullmatch(t))
         dur_m = _DUR_RE.search(remaining)
         if dur_m:
             minutes = float(dur_m.group(1)) * (60 if dur_m.group(2).startswith("h") else 1)
@@ -1209,6 +1218,12 @@ PLOT_SENSORS = {
     "B1A":     ("B1A_TEMPERATURE",     "B1A Temperature",      "K"),
     "B2":      ("B2_TEMPERATURE",      "B2 Temperature",       "K"),
     "FLOW":    ("FLOW_VALUE",          "He Flow",              "mmol/s"),
+}
+
+# User-typed short aliases → canonical PLOT_SENSORS key
+PLOT_SENSOR_ALIASES = {
+    "MC":      "MXC",   # mixing chamber
+    "MIXING":  "MXC",
 }
 
 PRESSURE_MAPPINGS_SET = {"P1_PRESSURE","P2_PRESSURE","P3_PRESSURE",
