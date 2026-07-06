@@ -102,6 +102,19 @@ def _normalise_mode(word: str) -> str:
     input if unrecognised, so the caller can reject it)."""
     return _MODE_ALIASES.get(word.strip().upper(), word.strip().upper())
 
+
+def _mode_in_text(t: str):
+    """Find a mode name mentioned anywhere in free text. Returns a canonical
+    mode or None. Checks TRANSITIONING first so 'warming' beats 'warm'."""
+    t = t.lower()
+    if re.search(r"transition|\btrans\b|cooling|warming|过渡|降温|升温", t):
+        return "TRANSITIONING"
+    if re.search(r"cold|低温|冷", t):
+        return "COLD"
+    if re.search(r"idle|室温|\bwarm\b|暖", t):
+        return "IDLE"
+    return None
+
 # ── Sensor registry ───────────────────────────────────────────────────────────
 SENSOR_LIST_COLD = [
     ("MXC_TEMPERATURE",     "MXC",    "Mixing chamber temperature"),
@@ -865,6 +878,19 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
 
     if lower in ("status", "mode"):
         _cmd_status(state, reply_ts)
+        return
+
+    # What alarms are configured? (optionally scoped to one mode)
+    #   "what is the alarm", "list alarms", "alarm in cold mode",
+    #   "alarms cold", "cold模式有什么报警", "what alerts in idle", ...
+    # No \b around the alarm word — it fails when a Chinese char is adjacent.
+    _alarm_word = re.search(r"alarms?|alerts?|报警|警报", lower)
+    _query_word = re.search(r"\b(what|which|list|show|display|tell)\b"
+                            r"|有什么|哪些|什么|列出|有哪些|告诉", lower)
+    _alarm_mode = _mode_in_text(lower)
+    _bare       = lower.strip() in ("alarms", "alarm", "alarm list", "alarm listing")
+    if _alarm_word and (_query_word or _alarm_mode or _bare):
+        _cmd_list_alarms(state, reply_ts, only_mode=_alarm_mode)
         return
 
     # set mode auto / idle / cold / transitioning
@@ -1650,6 +1676,8 @@ def _cmd_help(reply_ts=None):
         "`set mode cold` — force COLD mode (operational monitoring)\n"
         "`set mode transitioning` — force TRANSITIONING mode (cooling/warming — threshold alerts off)\n"
         "`list` — sensor numbers, short names, current thresholds\n"
+        "`what is the alarm` — list every configured alarm, grouped by mode\n"
+        "`what alarms in cold mode` — list alarms for one mode (idle/cold/transitioning)\n"
         "`status` — active overrides and silenced sensors\n"
         "`ack` — silence ALL sensors for 10 min\n"
         "`(reply under an alert)` `silent for 2h` / `mute 30min` / `silence 3 days` / `silent forever` — snooze that one sensor\n"
@@ -1663,6 +1691,65 @@ def _cmd_help(reply_ts=None):
         "`reset <sensor>` / `cold reset <sensor>` / `idle reset <sensor>` — restore default\n\n"
         "_<sensor> = number (see `list`), short name, or full mapping name_",
         color="#0066cc", thread_ts=reply_ts)
+
+
+def _format_threshold_alarms(thresholds: dict) -> list:
+    """Turn a THRESHOLDS_* dict into human-readable alarm bullet lines,
+    using the description text already stored in each tuple."""
+    out = []
+    for full, entry in thresholds.items():
+        max_v, min_v = entry[0], entry[1]
+        if len(entry) >= 4:            # (max, min, max_desc, min_desc)
+            if max_v is not None and entry[2]:
+                out.append(f"  • {entry[2]}")
+            if min_v is not None and entry[3]:
+                out.append(f"  • {entry[3]}")
+        elif entry[2]:                 # (max, min, desc) — one bound set
+            out.append(f"  • {entry[2]}")
+    return out
+
+
+def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
+    """List every configured alarm, grouped by operating mode, plus the
+    alarms that are active in all modes. If only_mode is given, show just
+    that mode's threshold alarms."""
+    cur_mode = state.get("current_mode", "IDLE")
+    header = ":rotating_light: *Configured Alarms*"
+    if only_mode:
+        header += f" — {MODE_EMOJI.get(only_mode, '')} {only_mode} mode"
+    lines = [header, ""]
+
+    def add_mode_section(mode):
+        emoji = MODE_EMOJI.get(mode, "")
+        star  = "   ← *current*" if mode == cur_mode else ""
+        lines.append(f"*{emoji} {mode} mode:*{star}")
+        if mode == "COLD":
+            body = _format_threshold_alarms(config.THRESHOLDS_COLD)
+        elif mode == "IDLE":
+            body = _format_threshold_alarms(config.THRESHOLDS_IDLE)
+        else:  # TRANSITIONING
+            body = ["  _Threshold alarms suppressed while cooling/warming._",
+                    "  *CRITICAL* alarm if any of these turns OFF:"]
+            for _, label in TRANSITIONING_REQUIRED_ON:
+                body.append(f"    • {label} must stay ON")
+        lines.extend(body or ["  _(none)_"])
+        lines.append("")
+
+    for md in ([only_mode] if only_mode else ["IDLE", "TRANSITIONING", "COLD"]):
+        add_mode_section(md)
+
+    lines.append("*Always on (every mode):*")
+    lines.append("  • Device on/off changes — Still/MXC heat switches & heaters, "
+                 "Pulse Tube, B1A/B2 turbo pumps")
+    lines.append("  • R1A pump on/off and power loss")
+    lines.append("  • Valve open/close changes")
+    lines.append("  • CS2 system alerts (error severity)")
+    lines.append("  • Cold cathode gauge issues")
+    lines.append("  • Data freshness — no new data arriving")
+
+    lines.append("\n_`what alarms in cold mode` for one mode · "
+                 "`what is the alarm` for everything · `list` for exact thresholds_")
+    send_slack("\n".join(lines), color="#cc0000", thread_ts=reply_ts)
 
 
 def _cmd_list(state: dict, reply_ts=None):
