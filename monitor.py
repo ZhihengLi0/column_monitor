@@ -20,6 +20,7 @@ Slack commands (@BlueFors-Alert <command>):
   set mode auto                     return to automatic mode detection
   set mode idle                     force IDLE mode
   set mode cold                     force COLD mode
+  set mode transitioning            force TRANSITIONING mode (suppress threshold alerts)
   ack                               silence ALL sensor alerts 10 min
   (reply in an alert thread)        "silent for 2h" / "mute 30min" / "silence 3 days" / "silent forever"
   change <sensor> to <val> for 5min / 10min / ever
@@ -84,6 +85,21 @@ MODE_DESC = {
         "System is *cold and operational*.\n"
         "Full sensor threshold monitoring active.",
 }
+
+# Accept short / loose spellings for each mode.
+_MODE_ALIASES = {
+    "AUTO": "AUTO", "AUTOMATIC": "AUTO",
+    "IDLE": "IDLE", "ROOM": "IDLE", "WARM": "IDLE",
+    "COLD": "COLD", "BASE": "COLD", "OPERATIONAL": "COLD",
+    "TRANSITIONING": "TRANSITIONING", "TRANSITION": "TRANSITIONING",
+    "TRANS": "TRANSITIONING", "COOLING": "TRANSITIONING", "WARMING": "TRANSITIONING",
+}
+
+
+def _normalise_mode(word: str) -> str:
+    """Map a user-typed mode word to its canonical form (or the upper-cased
+    input if unrecognised, so the caller can reject it)."""
+    return _MODE_ALIASES.get(word.strip().upper(), word.strip().upper())
 
 # ── Sensor registry ───────────────────────────────────────────────────────────
 SENSOR_LIST_COLD = [
@@ -844,7 +860,7 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
     # set mode auto / idle / cold / transitioning
     m = re.fullmatch(r"set\s+mode\s+(\S+)", text, re.IGNORECASE)
     if m:
-        val = m.group(1).upper()
+        val = _normalise_mode(m.group(1))
         if val == "AUTO":
             state["mode_override"] = None
             send_slack("✅ Mode detection set to *automatic* (based on 50K temperature).",
@@ -862,7 +878,7 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
             log.info(f"Mode manually set to {val}")
         else:
             send_slack(
-                f"Unknown mode `{m.group(1)}`. Valid options: `auto`, `idle`, `cold`.",
+                f"Unknown mode `{m.group(1)}`. Valid options: `auto`, `idle`, `cold`, `transitioning`.",
                 thread_ts=reply_ts)
         return
 
@@ -1079,19 +1095,22 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
                 send_slack("Say `sentinel on` or `sentinel off`.", thread_ts=reply_ts)
 
         elif intent == "set_mode":
-            mode = ent.get("mode")
-            if mode == "auto":
+            val = _normalise_mode(ent.get("mode") or "")
+            if val == "AUTO":
                 state["mode_override"] = None
                 send_slack("✅ Mode set to *auto* — detecting from 50K temperature.",
                            color="good", thread_ts=reply_ts)
-            elif mode in ("cold", "idle"):
-                val = mode.upper()
+            elif val in MODES:
                 state["last_alert_time"] = {}
                 state["acked_sensors"]   = {}
                 state["mode_override"]   = val
-                send_slack(f"✅ Mode manually set to *{val}*.", color="good", thread_ts=reply_ts)
+                state["current_mode"]    = val
+                state["mode_since"]      = datetime.now().isoformat()
+                send_slack(f"✅ Mode manually set to *{val}*. {MODE_EMOJI[val]}",
+                           color="good", thread_ts=reply_ts)
             else:
-                send_slack("Which mode? Say `cold`, `idle`, or `auto`.", thread_ts=reply_ts)
+                send_slack("Which mode? Say `cold`, `idle`, `transitioning`, or `auto`.",
+                           thread_ts=reply_ts)
 
         elif intent == "change_threshold":
             sensor  = ent.get("sensor")
@@ -1613,9 +1632,11 @@ def _cmd_help(reply_ts=None):
         "`set mode auto` — automatic mode detection (based on 50K temperature)\n"
         "`set mode idle` — force IDLE mode (room temperature monitoring)\n"
         "`set mode cold` — force COLD mode (operational monitoring)\n"
+        "`set mode transitioning` — force TRANSITIONING mode (cooling/warming — threshold alerts off)\n"
         "`list` — sensor numbers, short names, current thresholds\n"
         "`status` — active overrides and silenced sensors\n"
         "`ack` — silence ALL sensors for 10 min\n"
+        "`(reply under an alert)` `silent for 2h` / `mute 30min` / `silence 3 days` / `silent forever` — snooze that one sensor\n"
         "`pause alerts` — stop ALL alert messages (monitoring still runs in background)\n"
         "`resume alerts` — re-enable all alerts\n"
         "`sentinel on` — resume CS2 alert forwarding\n"

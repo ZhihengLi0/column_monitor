@@ -28,7 +28,7 @@ INTENT_LABELS = {
     "change_threshold": "change threshold",
     "reset_threshold":  "reset threshold",
     "sentinel":         "sentinel on/off",
-    "set_mode":         "set mode (cold/idle/auto)",
+    "set_mode":         "set mode (cold/idle/transitioning/auto)",
     "ack":                 "acknowledge alert",
     "daily_summary":       "daily summary",
     "help":                "help",
@@ -307,6 +307,10 @@ TRAINING_DATA = [
     ("set mode cold",                         "set_mode"),
     ("set mode idle",                         "set_mode"),
     ("set mode auto",                         "set_mode"),
+    ("set mode transitioning",                "set_mode"),
+    ("switch to transitioning mode",          "set_mode"),
+    ("mode transitioning",                    "set_mode"),
+    ("设为过渡模式",                          "set_mode"),
     ("switch to cold mode",                   "set_mode"),
     ("force cold mode",                       "set_mode"),
     ("go to idle mode",                       "set_mode"),
@@ -630,6 +634,8 @@ def _extract_float_value(text: str):
 
 def _extract_mode(text: str):
     t = text.lower()
+    if any(w in t for w in ["transition", "trans", "cooling", "warming", "过渡", "降温", "升温"]):
+        return "transitioning"
     if any(w in t for w in ["cold", "低温", "冷"]):
         return "cold"
     if any(w in t for w in ["idle", "室温", "暖", "warm"]):
