@@ -80,7 +80,8 @@ MODE_DESC = {
         "Monitoring: idle pressure checks + CS2 system alerts.",
     "TRANSITIONING":
         "System is *cooling down or warming up*.\n"
-        "Threshold alerts suppressed — only CS2 system alerts forwarded.",
+        "Threshold alerts suppressed, but Pulse Tube + Still/MXC heat switches\n"
+        "are checked — a *critical* alert fires if any of them turns OFF.",
     "COLD":
         "System is *cold and operational*.\n"
         "Full sensor threshold monitoring active.",
@@ -1878,6 +1879,14 @@ DEVICE_ALERT_MAPPINGS = HEATER_MAPPINGS + [
     ("PULSE_TUBE_ENABLED", "Pulse Tube"),
 ]
 
+# Devices that MUST stay ON while the fridge is cooling down / warming up.
+# If any of these is OFF during TRANSITIONING, raise a CRITICAL alert.
+TRANSITIONING_REQUIRED_ON = [
+    ("PULSE_TUBE_ENABLED",       "Pulse Tube"),
+    ("HEATSWITCH_STILL_ENABLED", "Still Heat Switch"),
+    ("HEATSWITCH_MXC_ENABLED",   "MXC Heat Switch"),
+]
+
 
 def check_heater_status(conn, state: dict) -> list:
     last_id = state.get("last_heater_event_id", 0)
@@ -1900,6 +1909,54 @@ def check_heater_status(conn, state: dict) -> list:
         msgs.append(f":fire: *{label}* changed → {status}\nTime: {row['time']}")
         log.info(f"Heater change: {row['mapping']} = {row['value']}")
     return msgs
+
+
+def check_transitioning_devices(conn, state: dict) -> list:
+    """During TRANSITIONING, the pulse tube and both heat switches MUST be ON.
+    If any is OFF, raise a CRITICAL alert. State-based (not change-based), so it
+    fires even if the device was already off before the mode was entered, and
+    keeps reminding every cooldown while still off. Respects per-device ack."""
+    if state.get("current_mode") != "TRANSITIONING":
+        return []
+
+    results  = []
+    now      = datetime.now()
+    cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+    acked    = state.setdefault("acked_sensors", {})
+    mappings = [m for m, _ in TRANSITIONING_REQUIRED_ON]
+
+    ph = ",".join(["%s"] * len(mappings))
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            f"SELECT DISTINCT ON (mapping) mapping, value, time "
+            f"FROM public.boolean_value_change_events "
+            f"WHERE mapping IN ({ph}) ORDER BY mapping, time DESC",
+            mappings)
+        rows = {r["mapping"]: r for r in cur.fetchall()}
+
+    label_map = dict(TRANSITIONING_REQUIRED_ON)
+    for mapping in mappings:
+        row = rows.get(mapping)
+        if row is None or row["value"]:
+            continue                       # no data, or ON → fine
+
+        ack_until = acked.get(mapping)
+        if ack_until and datetime.fromisoformat(ack_until) > now:
+            continue
+        last = state["last_alert_time"].get(mapping)
+        if last and now - datetime.fromisoformat(last) < cooldown:
+            continue
+
+        state["last_alert_time"][mapping] = now.isoformat()
+        label = label_map[mapping]
+        msg = (f":rotating_light: *CRITICAL — {label} is OFF during TRANSITIONING* :rotating_light:\n"
+               f"The {label.lower()} must stay *ON* while the fridge is cooling down or warming up.\n"
+               f"Turned OFF at: {row['time']}\n"
+               f"_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+        results.append((mapping, msg))
+        log.critical(f"TRANSITIONING device OFF: {mapping}")
+
+    return results
 
 
 def _cmd_heater_status(reply_ts: str, conn=None):
@@ -2343,6 +2400,9 @@ def run():
             all_alerts.append((None, freshness))
 
         all_alerts.extend(check_sensor_thresholds(conn, state))
+
+        # TRANSITIONING: pulse tube + heat switches must stay ON (critical)
+        all_alerts.extend(check_transitioning_devices(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
             all_alerts.append((None, msg))
