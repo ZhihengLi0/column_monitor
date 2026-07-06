@@ -1826,45 +1826,52 @@ def _format_threshold_alarms(thresholds: dict) -> list:
 
 
 def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
-    """List every configured alarm, grouped by operating mode, plus the
-    alarms that are active in all modes. If only_mode is given, show just
-    that mode's threshold alarms."""
+    """List every configured alarm together with the exact criterion that
+    triggers it — grouped by operating mode, plus the always-on alarms.
+    If only_mode is given, show just that mode's threshold alarms."""
     cur_mode = state.get("current_mode", "IDLE")
-    header = ":rotating_light: *Configured Alarms*"
+    header = ":rotating_light: *Configured Alarms — what triggers each one*"
     if only_mode:
-        header += f" — {MODE_EMOJI.get(only_mode, '')} {only_mode} mode"
+        header += f"\n_{MODE_EMOJI.get(only_mode, '')} {only_mode} mode only_"
     lines = [header, ""]
 
     def add_mode_section(mode):
         emoji = MODE_EMOJI.get(mode, "")
         star  = "   ← *current*" if mode == cur_mode else ""
-        lines.append(f"*{emoji} {mode} mode:*{star}")
+        lines.append(f"*{emoji} {mode} mode — alarm triggers when:*{star}")
         if mode == "COLD":
             body = _format_threshold_alarms(config.THRESHOLDS_COLD)
+            body.append("  • Cold cathode (P1) is OFF (should be ON while cold)")
         elif mode == "IDLE":
             body = _format_threshold_alarms(config.THRESHOLDS_IDLE)
+            body.append("  • Cold cathode (P1) is ON (should be OFF at room temperature)")
         else:  # TRANSITIONING
-            body = ["  _Threshold alarms suppressed while cooling/warming._",
+            body = ["  _Sensor threshold alarms are suppressed while cooling/warming._",
                     "  *CRITICAL* alarm if any of these turns OFF:"]
             for _, label in TRANSITIONING_REQUIRED_ON:
-                body.append(f"    • {label} must stay ON")
+                body.append(f"    • {label} switches OFF")
         lines.extend(body or ["  _(none)_"])
         lines.append("")
 
     for md in ([only_mode] if only_mode else ["IDLE", "TRANSITIONING", "COLD"]):
         add_mode_section(md)
 
-    lines.append("*Always on (every mode):*")
-    lines.append("  • Device on/off changes — Still/MXC heat switches & heaters, "
-                 "Pulse Tube, B1A/B2 turbo pumps")
-    lines.append("  • R1A pump on/off and power loss")
-    lines.append("  • Valve open/close changes")
-    lines.append("  • CS2 system alerts (error severity)")
-    lines.append("  • Cold cathode gauge issues")
-    lines.append("  • Data freshness — no new data arriving")
+    # Always-on criteria, built from the real constants so they stay in sync.
+    device_labels = ", ".join(lbl for _, lbl in DEVICE_ALERT_MAPPINGS)
+    valve_labels  = " / ".join(lbl for _, lbl in MONITORED_VALVES)
+    lines.append("*Always on (every mode) — alarm triggers when:*")
+    lines.append(f"  • *Any device switches ON or OFF* — {device_labels}")
+    lines.append("  • *R1A pump* — enable toggles, error flag set/cleared, "
+                 "or pump power crosses 0.1 W (stop/restart)")
+    lines.append(f"  • *Valves* — {valve_labels} open or close")
+    lines.append(f"  • *CS2 system alert* — new entry with severity ≥ "
+                 f"{config.CS2_ALERT_MIN_SEVERITY} (error)")
+    lines.append("  • *Data sync stalled* — no new sensor reading for > 5 min")
 
-    lines.append("\n_`what alarms in cold mode` for one mode · "
-                 "`what is the alarm` for everything · `list` for exact thresholds_")
+    lines.append(f"\n_Same alarm repeats at most every {config.ALERT_COOLDOWN_MINUTES} min "
+                 "(cooldown). Reply `silent for 2h` under an alert, or `ack` to hush all._")
+    lines.append("_`what alarms in cold mode` for one mode · "
+                 "`what is the alarm` for everything · `list` for exact threshold numbers_")
     send_slack("\n".join(lines), color="#cc0000", thread_ts=reply_ts)
 
 
