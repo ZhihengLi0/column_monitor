@@ -15,3 +15,4 @@
 {"text": "stop", "intent": "ack", "source": "corrected", "from_intent": "pause_alerts"}
 {"text": "Sentinel alert off for ever", "intent": "sentinel", "source": "confirmed"}
 {"text": "silence P2 pressure alarm for 1h", "intent": "ack", "source": "corrected", "from_intent": "pressure_reading"}
+{"text": "temp check", "intent": "temperature_reading", "source": "confirmed"}
