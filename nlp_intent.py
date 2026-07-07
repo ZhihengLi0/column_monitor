@@ -565,6 +565,19 @@ _CHINESE_HOURS = {"一": 1, "两": 2, "三": 3, "四": 4, "五": 5,
 def _extract_duration_minutes(text: str):
     """Return duration in minutes, or None if not found."""
     t = text.lower()
+    # N years / months / weeks / days (check before hours/min so "month" != "m")
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(years?|yrs?|months?|mos?|weeks?|wks?|days?|d)\b", t)
+    if m:
+        num, unit = float(m.group(1)), m.group(2)
+        mult = (525600 if unit.startswith("y") else 43200 if unit.startswith("mo")
+                else 10080 if unit.startswith("w") else 1440)
+        return int(num * mult)
+    # 天 / 周 / 月 / 年 (Chinese)
+    m = re.search(r"(\d+)\s*(天|日|周|星期|月|年)", text)
+    if m:
+        num, unit = int(m.group(1)), m.group(2)
+        mult = {"天": 1440, "日": 1440, "周": 10080, "星期": 10080, "月": 43200, "年": 525600}[unit]
+        return num * mult
     # Nh or Nhours
     m = re.search(r"(\d+(?:\.\d+)?)\s*h(?:our)?s?", t)
     if m:

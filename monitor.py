@@ -426,6 +426,41 @@ _FOREVER_RE = re.compile(
 # `fromisoformat(t) > now` check throughout the code keeps working.
 FOREVER_TS = datetime.max.isoformat()
 
+# Plot duration: a number + unit from minutes all the way up to years.
+# Longer unit words are listed first so "month"/"mo" beats bare "m" (minute).
+_PLOT_DUR_RE = re.compile(
+    r"(?<![.\d])(\d+(?:\.\d+)?)\s*"
+    r"(years?|yrs?|y|months?|mos?|mo|weeks?|wks?|w|days?|d|"
+    r"hours?|hrs?|hr|h|minutes?|mins?|min|m)\b",
+    re.IGNORECASE,
+)
+
+
+def _plot_unit_minutes(num: float, unit: str) -> float:
+    """Convert (number, unit) to minutes. Supports minute→year."""
+    u = unit.lower()
+    if u.startswith("y"):
+        return num * 525_600      # 365 days
+    if u.startswith("mo"):
+        return num * 43_200       # 30 days
+    if u.startswith("w"):
+        return num * 10_080       # 7 days
+    if u.startswith("d"):
+        return num * 1_440
+    if u.startswith("h"):
+        return num * 60
+    return num                    # minutes
+
+
+def _fmt_duration_minutes(m: float) -> str:
+    """Human-friendly range label: minutes → hours → days."""
+    if m < 60:
+        return f"{m:g} min"
+    if m < 1440:
+        return f"{m/60:g} h"
+    d = m / 1440
+    return f"{d:g} day" + ("" if d == 1 else "s")
+
 
 def parse_duration(text: str):
     """Parse a duration phrase.
@@ -888,7 +923,6 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
     # ── Plot parser: handles 1 or multiple sensors + time range or duration ──
     if lower.startswith("plot"):
         _TIME_PAT_RE = re.compile(r"^(\d{6}_\d{4})$")
-        _DUR_RE      = re.compile(r"(?<![.\d])(\d+(?:\.\d+)?)\s*(h(?:ours?)?|m(?:in(?:utes?)?)?)")
         tokens = lower.split()[1:]   # everything after "plot"
         sensor_keys, time_tokens, minutes = [], [], 30
         log.info(f"Plot parser: raw_text={repr(text)!r} lower={repr(lower)!r} tokens={tokens}")
@@ -903,12 +937,13 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
                 time_tokens.append(tok)
             elif _plot_key(tok):
                 sensor_keys.append(_plot_key(tok))
-        # Duration: search across full token string to handle "recent 2 hours", "2h", etc.
+        # Duration: search across full token string to handle "recent 2 hours",
+        # "2h", "past 30 days", "3 weeks", "6 months", "1 year", etc.
         remaining = " ".join(t for t in tokens
                              if not _plot_key(t) and not _TIME_PAT_RE.fullmatch(t))
-        dur_m = _DUR_RE.search(remaining)
+        dur_m = _PLOT_DUR_RE.search(remaining)
         if dur_m:
-            minutes = float(dur_m.group(1)) * (60 if dur_m.group(2).startswith("h") else 1)
+            minutes = _plot_unit_minutes(float(dur_m.group(1)), dur_m.group(2))
 
         if not sensor_keys and ctx_valid and ctx.get("sensor_key"):
             sensor_keys = [ctx["sensor_key"]]   # "plot 12h" uses last sensor
@@ -1412,8 +1447,7 @@ def _cmd_plot(sensor_key: str, reply_ts: str, conn=None,
     else:
         t_to   = datetime.now(timezone.utc)
         t_from = t_to - timedelta(minutes=minutes)
-        mins_label = f"{minutes:g}"
-        range_label = f"last {mins_label} min"
+        range_label = f"last {_fmt_duration_minutes(minutes)}"
 
     with conn.cursor() as cur:
         cur.execute(
@@ -1503,8 +1537,7 @@ def _cmd_plot_multi(sensor_keys: list, reply_ts: str, conn=None,
     else:
         t_to   = datetime.now(timezone.utc)
         t_from = t_to - timedelta(minutes=minutes)
-        mins_label  = f"{minutes:g}"
-        range_label = f"last {mins_label} min"
+        range_label = f"last {_fmt_duration_minutes(minutes)}"
 
     # Fetch and convert each sensor's data
     sensor_data = {}

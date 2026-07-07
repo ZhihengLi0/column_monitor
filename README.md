@@ -820,6 +820,7 @@ React to any alert message with **✅ 👏 👍 🤙**, or reply `ok` / `OK` in 
 | `plot <sensor>` | Plot last 30 min as image (sends PNG to Slack) |
 | `plot <sensor> 2h` | Plot last N hours — also accepts `2.5h`, `recent 2 hours`, natural language |
 | `plot <sensor> 30min` | Plot last N minutes |
+| `plot <sensor> 30 days` | Longer ranges: `days`, `weeks`, `months`, `years` (e.g. `plot P1 P5 for past 30 days`, `3 weeks`, `6 months`, `1 year`; EN + 中文 天/周/月/年) |
 | `plot <sensor> YYMMDD_HHMM YYMMDD_HHMM` | Plot a specific time range (CDT) |
 | `plot <s1> <s2> 2h` | **Multi-sensor comparison** — overlay two or more sensors on one chart |
 | `plot <s1> <s2> <s3> 12h` | Up to ~6 sensors; dual y-axis when units differ (e.g. mbar + K) |
