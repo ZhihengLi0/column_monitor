@@ -81,5 +81,22 @@ CS2_ALERT_MIN_SEVERITY = 2
 FILTER_INTERVAL_DAYS         = 21
 FILTER_REMINDER_INTERVAL_MIN = 10
 
+# ── GHS compressed-air pressure alarms (checked in ALL modes) ──────────────────
+# Two-level low-pressure alarms on the gas-handling-system compressed air.
+# NOTE: thresholds are in kPa — they assume the database stores these mappings in
+# kPa. Verify the unit once the data is actually syncing (BlueFors PLC may report
+# Pa/bar). Each entry: label, normal, warn_below (None = no warning level),
+# crit_below (None = no critical level), unit.
+AIR_PRESSURE_ALARMS = {
+    "plc.GHSDiagnostics.fInputAirPressure": {
+        "label": "Compressed Air — Input Pressure",
+        "normal": 690, "warn_below": 620, "crit_below": 540, "unit": "kPa",
+    },
+    "plc.GHSDiagnostics.fRegulatorAirPressure": {
+        "label": "Compressed Air — Regulator Pressure",
+        "normal": 492, "warn_below": None, "crit_below": 485, "unit": "kPa",
+    },
+}
+
 # Sync batch size (rows per table per sync cycle, Windows side)
 SYNC_BATCH_SIZE = 5000

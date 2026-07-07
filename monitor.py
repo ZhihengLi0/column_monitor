@@ -1875,6 +1875,15 @@ def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
     lines.append(f"  • *CS2 system alert* — new entry with severity ≥ "
                  f"{config.CS2_ALERT_MIN_SEVERITY} (error)")
     lines.append("  • *Data sync stalled* — no new sensor reading for > 5 min")
+    for cfg in getattr(config, "AIR_PRESSURE_ALARMS", {}).values():
+        u = cfg["unit"]
+        parts = []
+        if cfg.get("warn_below") is not None:
+            parts.append(f"warning < {cfg['warn_below']}")
+        if cfg.get("crit_below") is not None:
+            parts.append(f"*CRITICAL* < {cfg['crit_below']}")
+        lines.append(f"  • *{cfg['label']}* low — {', '.join(parts)} {u} "
+                     f"(normal ~{cfg['normal']} {u})")
 
     lines.append(f"\n_Same alarm repeats at most every {config.ALERT_COOLDOWN_MINUTES} min "
                  "(cooldown). Reply `silent for 2h` under an alert, or `ack` to hush all._")
@@ -2416,6 +2425,71 @@ def check_cold_cathode(conn, state: dict):
     return msg
 
 
+def check_air_pressure(conn, state: dict) -> list:
+    """GHS compressed-air pressures — checked in ALL modes. Two levels: a warning
+    below warn_below and a CRITICAL below crit_below. Escalation (warning →
+    critical) fires immediately, bypassing the cooldown. Silently does nothing
+    until the mappings actually appear in the database."""
+    alarms = getattr(config, "AIR_PRESSURE_ALARMS", {})
+    if not alarms:
+        return []
+
+    results  = []
+    now      = datetime.now()
+    cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+    acked    = state.setdefault("acked_sensors", {})
+    levels   = state.setdefault("air_pressure_level", {})
+    mappings = list(alarms)
+
+    ph = ",".join(["%s"] * len(mappings))
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        cur.execute(
+            f"SELECT DISTINCT ON (mapping) mapping, value, time "
+            f"FROM public.double_value_change_events "
+            f"WHERE mapping IN ({ph}) ORDER BY mapping, time DESC",
+            mappings)
+        rows = {r["mapping"]: r for r in cur.fetchall()}
+
+    for mp, cfg in alarms.items():
+        row = rows.get(mp)
+        if row is None or row["value"] is None:
+            continue                        # not synced / no data yet
+        val  = row["value"]
+        crit = cfg.get("crit_below")
+        warn = cfg.get("warn_below")
+        if crit is not None and val < crit:
+            level = "CRITICAL"
+        elif warn is not None and val < warn:
+            level = "WARNING"
+        else:                               # recovered / normal
+            levels.pop(mp, None)
+            state["last_alert_time"].pop(mp, None)
+            continue
+
+        ack_until = acked.get(mp)
+        if ack_until and datetime.fromisoformat(ack_until) > now:
+            continue
+
+        escalated = (level == "CRITICAL" and levels.get(mp) != "CRITICAL")
+        last = state["last_alert_time"].get(mp)
+        if not escalated and last and now - datetime.fromisoformat(last) < cooldown:
+            continue
+
+        state["last_alert_time"][mp] = now.isoformat()
+        levels[mp] = level
+        unit  = cfg["unit"]
+        thr   = crit if level == "CRITICAL" else warn
+        emoji = ":rotating_light:" if level == "CRITICAL" else ":warning:"
+        tail  = " :rotating_light:" if level == "CRITICAL" else ""
+        msg = (f"{emoji} *{level} — {cfg['label']} is LOW*{tail}\n"
+               f"Current: `{val:g} {unit}` (normal ~{cfg['normal']} {unit}; "
+               f"{level.lower()} below {thr} {unit}).\n"
+               f"_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+        results.append((mp, msg))
+        log.warning(f"Air pressure {level}: {mp} = {val} {unit}")
+    return results
+
+
 def check_data_freshness(conn, state: dict):
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(time) FROM public.double_value_change_events")
@@ -2690,6 +2764,9 @@ def run():
 
         # TRANSITIONING: pulse tube must stay ON (critical)
         all_alerts.extend(check_transitioning_devices(conn, state))
+
+        # GHS compressed-air pressure (all modes, warning + critical)
+        all_alerts.extend(check_air_pressure(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
             all_alerts.append((None, msg))
