@@ -109,5 +109,14 @@ AIR_PRESSURE_ALARMS = {
 # treated as benign and ignored (e.g. pressure-gauge under/over-range).
 DEVICE_FLAG_IGNORE = ("underrange", "overrange")
 
+# ── Cool-down milestone notifications (informational) ──────────────────────────
+# When a plate cools past a threshold (downward crossing), send a one-time info
+# message. Fires only on the way DOWN (cool-down); re-arms once it warms back
+# above threshold + hysteresis. Each entry: (mapping, below_K, label).
+COOLDOWN_MILESTONES = [
+    ("4K_TEMPERATURE", 10.0, "4K plate"),
+]
+COOLDOWN_MILESTONE_HYSTERESIS_K = 1.0
+
 # Sync batch size (rows per table per sync cycle, Windows side)
 SYNC_BATCH_SIZE = 5000

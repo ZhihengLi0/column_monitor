@@ -2728,6 +2728,40 @@ def check_data_freshness(conn, state: dict):
     return (f":sos: *Data sync may have stopped!* "
             f"Latest reading is {int(age.total_seconds()/60)} min old.")
 
+
+def check_cooldown_milestone(conn, state: dict) -> list:
+    """Informational one-time notifications when a plate cools past a threshold
+    (downward crossing only, i.e. during cool-down). Re-arms after warming back
+    above threshold + hysteresis. Not a repeating alarm."""
+    milestones = getattr(config, "COOLDOWN_MILESTONES", [])
+    if not milestones:
+        return []
+    hyst  = getattr(config, "COOLDOWN_MILESTONE_HYSTERESIS_K", 1.0)
+    flags = state.setdefault("cooldown_milestones", {})
+    results = []
+    with conn.cursor() as cur:
+        for mapping, below_k, label in milestones:
+            cur.execute("SELECT value FROM public.double_value_change_events "
+                        "WHERE mapping = %s ORDER BY time DESC LIMIT 1", (mapping,))
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                continue
+            v   = float(row[0])
+            key = f"{mapping}<{below_k:g}"
+            if key not in flags:
+                flags[key] = (v < below_k)      # first sight → arm, don't alert
+                continue
+            if v < below_k and not flags[key]:
+                flags[key] = True
+                results.append((None,
+                    f":snowflake: *{label} is now below {below_k:g} K* — currently "
+                    f"`{v:.2f} K`.\n_Cool-down milestone._"))
+                log.info(f"Cooldown milestone: {label} below {below_k} K ({v:.3g} K)")
+            elif v >= below_k + hyst and flags[key]:
+                flags[key] = False              # re-arm after warming back up
+    return results
+
+
 # ── Init ──────────────────────────────────────────────────────────────────────
 
 def init_state(conn) -> dict:
@@ -2990,6 +3024,9 @@ def run():
 
         # Health of every device in device_states (all modes, warning + critical)
         all_alerts.extend(check_device_health(conn, state))
+
+        # Informational cool-down milestones (e.g. 4K plate below 10 K)
+        all_alerts.extend(check_cooldown_milestone(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
             all_alerts.append((None, msg))
