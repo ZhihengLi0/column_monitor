@@ -1876,14 +1876,17 @@ def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
                  f"{config.CS2_ALERT_MIN_SEVERITY} (error)")
     lines.append("  • *Data sync stalled* — no new sensor reading for > 5 min")
     for cfg in getattr(config, "AIR_PRESSURE_ALARMS", {}).values():
-        u = cfg["unit"]
+        u = cfg["unit"]; s = cfg.get("scale", 1)
         parts = []
         if cfg.get("warn_below") is not None:
-            parts.append(f"warning < {cfg['warn_below']}")
+            parts.append(f"warning < {cfg['warn_below']*s:g}")
         if cfg.get("crit_below") is not None:
-            parts.append(f"*CRITICAL* < {cfg['crit_below']}")
+            parts.append(f"*CRITICAL* < {cfg['crit_below']*s:g}")
         lines.append(f"  • *{cfg['label']}* low — {', '.join(parts)} {u} "
-                     f"(normal ~{cfg['normal']} {u})")
+                     f"(normal ~{cfg['normal']*s:g} {u})")
+    lines.append("  • *Any device fault* — every device in the system is checked; "
+                 "an error → *CRITICAL*, a warning → WARNING (pulse tube, compressor, "
+                 "pumps, gauges, valves, GHS, …)")
 
     lines.append(f"\n_Same alarm repeats at most every {config.ALERT_COOLDOWN_MINUTES} min "
                  "(cooldown). Reply `silent for 2h` under an alert, or `ack` to hush all._")
@@ -2425,13 +2428,43 @@ def check_cold_cathode(conn, state: dict):
     return msg
 
 
+def _latest_device_state(conn, device_id: str) -> dict | None:
+    """Return the latest device_states JSON blob for a device, or None."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT values FROM public.device_states "
+                        "WHERE device_id = %s ORDER BY datetime DESC LIMIT 1",
+                        (device_id,))
+            row = cur.fetchone()
+    except Exception as e:
+        log.error(f"device_states read failed for {device_id}: {e}")
+        return None
+    if not row or row[0] is None:
+        return None
+    val = row[0]
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except Exception:
+            return None
+    return val if isinstance(val, dict) else None
+
+
+def _humanize_flag(flag: str) -> str:
+    """'bErrorOilRunningHigh' -> 'Oil Running High'."""
+    name = re.sub(r"^b(?:Error|Warning)", "", flag)
+    return re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name).strip()
+
+
 def check_air_pressure(conn, state: dict) -> list:
-    """GHS compressed-air pressures — checked in ALL modes. Two levels: a warning
-    below warn_below and a CRITICAL below crit_below. Escalation (warning →
-    critical) fires immediately, bypassing the cooldown. Silently does nothing
-    until the mappings actually appear in the database."""
+    """GHS compressed-air pressures (device_states JSON) — checked in ALL modes.
+    Two levels: WARNING below warn_below, CRITICAL below crit_below (thresholds in
+    Pa). Escalation (warning → critical) fires immediately, bypassing cooldown."""
     alarms = getattr(config, "AIR_PRESSURE_ALARMS", {})
     if not alarms:
+        return []
+    js = _latest_device_state(conn, config.AIR_PRESSURE_DEVICE)
+    if not js:
         return []
 
     results  = []
@@ -2439,54 +2472,133 @@ def check_air_pressure(conn, state: dict) -> list:
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
     acked    = state.setdefault("acked_sensors", {})
     levels   = state.setdefault("air_pressure_level", {})
-    mappings = list(alarms)
 
-    ph = ",".join(["%s"] * len(mappings))
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            f"SELECT DISTINCT ON (mapping) mapping, value, time "
-            f"FROM public.double_value_change_events "
-            f"WHERE mapping IN ({ph}) ORDER BY mapping, time DESC",
-            mappings)
-        rows = {r["mapping"]: r for r in cur.fetchall()}
-
-    for mp, cfg in alarms.items():
-        row = rows.get(mp)
-        if row is None or row["value"] is None:
-            continue                        # not synced / no data yet
-        val  = row["value"]
+    for field, cfg in alarms.items():
+        val = js.get(field)
+        if val is None:
+            continue
         crit = cfg.get("crit_below")
         warn = cfg.get("warn_below")
         if crit is not None and val < crit:
             level = "CRITICAL"
         elif warn is not None and val < warn:
             level = "WARNING"
-        else:                               # recovered / normal
-            levels.pop(mp, None)
-            state["last_alert_time"].pop(mp, None)
+        else:                               # normal / recovered
+            levels.pop(field, None)
+            state["last_alert_time"].pop(field, None)
             continue
 
-        ack_until = acked.get(mp)
+        ack_until = acked.get(field)
         if ack_until and datetime.fromisoformat(ack_until) > now:
             continue
-
-        escalated = (level == "CRITICAL" and levels.get(mp) != "CRITICAL")
-        last = state["last_alert_time"].get(mp)
+        escalated = (level == "CRITICAL" and levels.get(field) != "CRITICAL")
+        last = state["last_alert_time"].get(field)
         if not escalated and last and now - datetime.fromisoformat(last) < cooldown:
             continue
 
-        state["last_alert_time"][mp] = now.isoformat()
-        levels[mp] = level
+        state["last_alert_time"][field] = now.isoformat()
+        levels[field] = level
+        scale = cfg.get("scale", 1)
         unit  = cfg["unit"]
-        thr   = crit if level == "CRITICAL" else warn
+        thr   = (crit if level == "CRITICAL" else warn) * scale
         emoji = ":rotating_light:" if level == "CRITICAL" else ":warning:"
         tail  = " :rotating_light:" if level == "CRITICAL" else ""
         msg = (f"{emoji} *{level} — {cfg['label']} is LOW*{tail}\n"
-               f"Current: `{val:g} {unit}` (normal ~{cfg['normal']} {unit}; "
-               f"{level.lower()} below {thr} {unit}).\n"
+               f"Current: `{val*scale:g} {unit}` (normal ~{cfg['normal']*scale:g} {unit}; "
+               f"{level.lower()} below {thr:g} {unit}).\n"
                f"_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
-        results.append((mp, msg))
-        log.warning(f"Air pressure {level}: {mp} = {val} {unit}")
+        results.append((field, msg))
+        log.warning(f"Air pressure {level}: {field} = {val} Pa")
+    return results
+
+
+def _device_faults(js: dict) -> tuple:
+    """From a device_states JSON blob, return (errors, warnings) as lists of
+    human-readable strings, combining statusInfo and per-device bError/bWarning
+    flags (skipping benign flags in config.DEVICE_FLAG_IGNORE)."""
+    ignore = getattr(config, "DEVICE_FLAG_IGNORE", ())
+    def _benign(flag):
+        low = flag.lower()
+        return any(sub in low for sub in ignore)
+
+    si = js.get("statusInfo") or {}
+    errors   = [str(e) for e in (si.get("errors")   or [])]
+    warnings = [str(w) for w in (si.get("warnings") or [])]
+    for k, v in js.items():
+        if v is not True or _benign(k):
+            continue
+        if k.startswith("bError"):
+            errors.append(_humanize_flag(k))
+        elif k.startswith("bWarning"):
+            warnings.append(_humanize_flag(k))
+    if si.get("errorBit") and not errors:
+        errors.append("error bit set")
+    if si.get("warningBit") and not warnings:
+        warnings.append("warning bit set")
+    return sorted(set(errors)), sorted(set(warnings))
+
+
+def check_device_health(conn, state: dict) -> list:
+    """Health of EVERY device in device_states (all modes). Any device reporting
+    an error → CRITICAL, a warning → WARNING, using each device's own status flags
+    (pulse tube, compressor, pumps, gauges, valves, GHS, …). Re-alerts when the
+    active-fault set changes or after the cooldown; clears when back to healthy.
+    Per-device+severity ack/silence."""
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT DISTINCT ON (device_id) device_id, values "
+                        "FROM public.device_states ORDER BY device_id, datetime DESC")
+            rows = cur.fetchall()
+    except Exception as e:
+        log.error(f"device_states read failed: {e}")
+        return []
+
+    results  = []
+    now      = datetime.now()
+    cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+    acked    = state.setdefault("acked_sensors", {})
+    prev     = dict(state.get("device_health", {}))
+    current  = {}
+
+    for row in rows:
+        dev = row["device_id"]
+        js  = row["values"]
+        if isinstance(js, str):
+            try:
+                js = json.loads(js)
+            except Exception:
+                continue
+        if not isinstance(js, dict):
+            continue
+        name = (js.get("instrumentInfo") or {}).get("name") or js.get("identifier") or dev
+        errors, warnings = _device_faults(js)
+
+        for sev, items, emoji, level in (
+            ("error",   errors,   ":rotating_light:", "CRITICAL"),
+            ("warning", warnings, ":warning:",        "WARNING"),
+        ):
+            key = f"DEVICE::{dev}::{sev}"
+            if not items:
+                state["last_alert_time"].pop(key, None)
+                continue
+            current[key] = items
+            ack_until = acked.get(key)
+            if ack_until and datetime.fromisoformat(ack_until) > now:
+                continue
+            changed = set(items) != set(prev.get(key, []))
+            last    = state["last_alert_time"].get(key)
+            if not changed and last and now - datetime.fromisoformat(last) < cooldown:
+                continue
+            state["last_alert_time"][key] = now.isoformat()
+            body   = "\n".join(f"    • {x}" for x in items)
+            tail   = f" {emoji}" if level == "CRITICAL" else ""
+            plural = "s" if len(items) > 1 else ""
+            msg = (f"{emoji} *{level} — {name}: {sev}{plural}*{tail}\n{body}\n"
+                   f"_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+            results.append((key, msg))
+            log.warning(f"Device {sev} [{dev}]: {items}")
+
+    state["device_health"] = current
     return results
 
 
@@ -2767,6 +2879,9 @@ def run():
 
         # GHS compressed-air pressure (all modes, warning + critical)
         all_alerts.extend(check_air_pressure(conn, state))
+
+        # Health of every device in device_states (all modes, warning + critical)
+        all_alerts.extend(check_device_health(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
             all_alerts.append((None, msg))

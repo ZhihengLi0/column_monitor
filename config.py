@@ -82,21 +82,32 @@ FILTER_INTERVAL_DAYS         = 21
 FILTER_REMINDER_INTERVAL_MIN = 10
 
 # ── GHS compressed-air pressure alarms (checked in ALL modes) ──────────────────
-# Two-level low-pressure alarms on the gas-handling-system compressed air.
-# NOTE: thresholds are in kPa — they assume the database stores these mappings in
-# kPa. Verify the unit once the data is actually syncing (BlueFors PLC may report
-# Pa/bar). Each entry: label, normal, warn_below (None = no warning level),
-# crit_below (None = no critical level), unit.
+# Read from device_states JSON (device AIR_PRESSURE_DEVICE). The PLC stores these
+# in Pa, so thresholds below are in Pa; they are displayed in kPa (scale 0.001).
+# Each entry keyed by the JSON field: label, normal, warn_below (None = no warning),
+# crit_below (None = no critical), display unit, scale (multiply raw for display).
+AIR_PRESSURE_DEVICE = "plc.GHSDiagnostics"
 AIR_PRESSURE_ALARMS = {
-    "plc.GHSDiagnostics.fInputAirPressure": {
+    "fInputAirPressure": {
         "label": "Compressed Air — Input Pressure",
-        "normal": 690, "warn_below": 620, "crit_below": 540, "unit": "kPa",
+        "normal": 690_000, "warn_below": 620_000, "crit_below": 540_000,
+        "unit": "kPa", "scale": 0.001,
     },
-    "plc.GHSDiagnostics.fRegulatorAirPressure": {
+    "fRegulatorAirPressure": {
         "label": "Compressed Air — Regulator Pressure",
-        "normal": 492, "warn_below": None, "crit_below": 485, "unit": "kPa",
+        "normal": 492_000, "warn_below": None, "crit_below": 485_000,
+        "unit": "kPa", "scale": 0.001,
     },
 }
+
+# ── Device health alarms (ALL devices in device_states, every mode) ────────────
+# Every device reports its own health in the JSON: statusInfo.errors/errorBit
+# (→ CRITICAL) and statusInfo.warnings/warningBit (→ WARNING), plus per-device
+# bError*/bWarning* boolean flags (pulse tube, pumps, gauges, …). Covers the pulse
+# tube compressor, helium compressor, rough/turbo pumps, pressure gauges, valves,
+# GHS, etc. — no manual thresholds needed. Flag-name substrings listed here are
+# treated as benign and ignored (e.g. pressure-gauge under/over-range).
+DEVICE_FLAG_IGNORE = ("underrange", "overrange")
 
 # Sync batch size (rows per table per sync cycle, Windows side)
 SYNC_BATCH_SIZE = 5000
