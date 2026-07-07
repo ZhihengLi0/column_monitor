@@ -900,6 +900,29 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
         _cmd_help(reply_ts)
         return
 
+    # ── LN2 scale queries (separate ln2 database, same bot/channel) ───────────
+    # Handled before the fridge commands so "plot ln2 weight" doesn't hit the
+    # fridge plot parser. Natural language: weight / nitrogen / 液氮 / 秤 / ...
+    try:
+        import sys as _sys
+        if "/home/cdms/ln2_monitor" not in _sys.path:
+            _sys.path.insert(0, "/home/cdms/ln2_monitor")
+        import ln2_query
+    except Exception as _e:
+        ln2_query = None
+        log.debug(f"ln2_query unavailable: {_e}")
+    if ln2_query and ln2_query.LN2_RE.search(lower):
+        kind, payload = ln2_query.handle(lower)
+        if kind == "plot":
+            img, caption = payload
+            if img:
+                slack_upload_image(img, caption, thread_ts=reply_ts)
+            else:
+                send_slack(caption, thread_ts=reply_ts)
+        else:
+            send_slack(payload, color="#2196F3", thread_ts=reply_ts)
+        return
+
     if re.fullmatch(r"pressure\s+reading", lower):
         _cmd_pressure(reply_ts, conn)
         return
@@ -1828,6 +1851,9 @@ def _cmd_help(reply_ts=None):
         "`pump status` — show on/off, power, speed for all 5 pumps (B1A, B2, R1A, R2, COM)\n"
         "`heater status` — show on/off and power for Still/MXC heat switches and heaters\n"
         "`pulse tube status` — compressor coolant/oil/He temps, high/low pressure, current + faults\n"
+        "\n*Liquid nitrogen scale* (natural language OK):\n"
+        "`ln2` / `how much liquid nitrogen` / `液氮还剩多少` — current weight, temp, humidity + 1 h trend\n"
+        "`plot ln2 weight 6h` / `液氮曲线 2h` — weight-vs-time chart (min/hour/day)\n\n"
         "`plot <sensor>` — plot last 30 min of data as image (e.g. `plot P1`, `plot MXC`)\n"
         "`plot <sensor> <N>min` — plot last N minutes (e.g. `plot P5 60min`)\n"
         "`plot <sensor> YYMMDD_HHMM YYMMDD_HHMM` — plot custom time range in CDT (e.g. `plot P1 260622_0000 260622_1200`)\n"
