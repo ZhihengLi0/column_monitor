@@ -797,7 +797,7 @@ React to any alert message with **✅ 👏 👍 🤙**, or reply `ok` / `OK` in 
 | Command | Description |
 |---|---|
 | `help` | Show all available commands |
-| `temperature reading` | Current temperatures — MXC, Still, 4K, 50K, B1A, B2 (auto-converts to mK when cold) |
+| `temperature reading` | Current temperatures — MXC1, MXC2, Still, 4K, 50K, B1A, B2. Shows K and °C; auto-converts to mK when cold |
 | `pressure reading` | Latest P1–P7 pressures + Cold Cathode ON/OFF |
 | `pump status` | B1A, B2 (turbo), R1A, R2 (scroll), COM compressor — on/off, speed, power, temp |
 | `heater status` | Still/MXC heat switches and heaters — on/off and power |
@@ -1346,6 +1346,7 @@ This release series marks a fundamental shift: the bot moves from rigid command 
 | 4.1.0 | [v4.1.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.1.0) | **Plot durations up to years** — the plot duration parser now accepts `days`, `weeks`, `months`, `years` (EN + 中文 天/周/月/年), e.g. `plot P1 P5 for past 30 days`. Fixes long durations being read as minutes; `month`/`mo` disambiguated from bare `m` |
 | 4.2.0 | [v4.2.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.2.0) | **Running-gated device faults + explicit pulse-tube criteria** — operational fault flags are evaluated only while the device is running (`bCompressorRunning`/`bPumpOnOff`), so the pulse-tube compressor's coolant/oil/helium/pressure/current limits fire only while it is ON. The alarm listing now spells out the pulse-tube parameters and their factory CRITICAL/WARNING limits |
 | 4.3.0 | [v4.3.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.3.0) | **`pulse tube status` command** — live compressor readings: coolant-in/out, oil, helium temperatures (°C), high/low pressure (psi), motor current (A), running state, total operating hours, and any active factory-limit faults. Triggered by `pulse tube status` / `pulsetube …` / `pt status` |
+| 4.4.0 | [v4.4.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.4.0) | **Readout tweaks + cool-down milestone** — `temperature reading` now shows both MXC thermometers (MXC1, MXC2) and adds °C alongside K. New informational notification when a plate cools past a threshold on the way down (default: 4K plate < 10 K, one-time, re-arms after warming; config `COOLDOWN_MILESTONES`) |
 
 ---
 
