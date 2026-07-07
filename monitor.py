@@ -1854,9 +1854,10 @@ def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
             body.append("  • Cold cathode (P1) is ON (should be OFF at room temperature)")
         else:  # TRANSITIONING
             body = ["  _Sensor threshold alarms are suppressed while cooling/warming._",
-                    "  *CRITICAL* alarm if any of these turns OFF:"]
-            for _, label in TRANSITIONING_REQUIRED_ON:
-                body.append(f"    • {label} switches OFF")
+                    "  Direction is auto-detected from the 50K plate trend."]
+            for direction, devices in TRANSITIONING_REQUIRED.items():
+                names = ", ".join(lbl for _, lbl in devices)
+                body.append(f"  *{direction.title()}:* CRITICAL if OFF → {names}")
         lines.extend(body or ["  _(none)_"])
         lines.append("")
 
@@ -1917,9 +1918,12 @@ def _cmd_status(state: dict, reply_ts=None):
     override  = state.get("mode_override")
     emoji     = MODE_EMOJI.get(mode, "")
 
+    mode_str = f"{emoji} `{mode}`"
+    if mode == "TRANSITIONING" and state.get("transition_direction"):
+        mode_str += f" — *{state['transition_direction']}*"
     lines = [
         f"*Monitor Status*\n",
-        f"*Mode:* {emoji} `{mode}`"
+        f"*Mode:* {mode_str}"
         + (f" *(manually set)*" if override else f" *(auto-detected)*"),
         f"*Since:* {since}",
         f"\n_{MODE_DESC.get(mode, '')}_",
@@ -2113,12 +2117,49 @@ DEVICE_ALERT_MAPPINGS = HEATER_MAPPINGS + [
     ("B2_ENABLED",         "B2 Turbo Pump"),
 ]
 
-# Device that MUST stay ON while the fridge is cooling down / warming up.
-# If the pulse tube is OFF during TRANSITIONING, raise a CRITICAL alert.
-# (Heat switches still get normal on/off change alerts via check_heater_status.)
-TRANSITIONING_REQUIRED_ON = [
-    ("PULSE_TUBE_ENABLED", "Pulse Tube"),
-]
+# Devices that MUST stay ON during TRANSITIONING, split by direction (cool down
+# vs warm up) because the two phases can have different requirements. If any
+# listed device is OFF, raise a CRITICAL alert. (Heat switches still get normal
+# on/off change alerts via check_heater_status.)
+TRANSITIONING_REQUIRED = {
+    "cool down": [("PULSE_TUBE_ENABLED", "Pulse Tube")],
+    "warm up":   [("PULSE_TUBE_ENABLED", "Pulse Tube")],
+}
+
+# How far the 50K plate must move (K) over the trend window to call a direction.
+_TRANSITION_TREND_WINDOW_MIN = 15
+_TRANSITION_TREND_DEADBAND_K = 0.5
+
+
+def _transitioning_direction(conn) -> str | None:
+    """Is the fridge cooling down or warming up? Decided from the 50K plate
+    trend over the last ~15 min. Returns 'cool down', 'warm up', or None
+    (flat/unknown — e.g. not enough history)."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT value, time FROM public.double_value_change_events "
+                "WHERE mapping = %s ORDER BY time DESC LIMIT 1",
+                (config.MODE_DETECTION_SENSOR,))
+            latest = cur.fetchone()
+            if not latest:
+                return None
+            cutoff = latest[1] - timedelta(minutes=_TRANSITION_TREND_WINDOW_MIN)
+            cur.execute(
+                "SELECT value FROM public.double_value_change_events "
+                "WHERE mapping = %s AND time <= %s ORDER BY time DESC LIMIT 1",
+                (config.MODE_DETECTION_SENSOR, cutoff))
+            past = cur.fetchone()
+    except Exception:
+        return None
+    if not past:
+        return None
+    delta = latest[0] - past[0]
+    if delta <= -_TRANSITION_TREND_DEADBAND_K:
+        return "cool down"
+    if delta >= _TRANSITION_TREND_DEADBAND_K:
+        return "warm up"
+    return None
 
 
 def check_heater_status(conn, state: dict) -> list:
@@ -2145,18 +2186,28 @@ def check_heater_status(conn, state: dict) -> list:
 
 
 def check_transitioning_devices(conn, state: dict) -> list:
-    """During TRANSITIONING, the pulse tube MUST stay ON. If it is OFF, raise a
-    CRITICAL alert. State-based (not change-based), so it fires even if it was
-    already off before the mode was entered, and keeps reminding every cooldown
-    while still off. Respects per-device ack."""
+    """During TRANSITIONING, the devices required for the current direction
+    (cool down / warm up) MUST stay ON. If any is OFF, raise a CRITICAL alert.
+    State-based (not change-based), so it fires even if a device was already off
+    before the mode was entered, and keeps reminding every cooldown while still
+    off. Respects per-device ack."""
     if state.get("current_mode") != "TRANSITIONING":
+        state.pop("transition_direction", None)
         return []
+
+    direction = _transitioning_direction(conn)
+    state["transition_direction"] = direction        # for status display
+    # Unknown direction (flat) → still enforce, using the cool-down requirement.
+    required   = TRANSITIONING_REQUIRED[direction or "cool down"]
+    dir_label  = f" ({direction})" if direction else ""
+    dir_verb   = {"cool down": "cooling down",
+                  "warm up": "warming up"}.get(direction, "cooling down or warming up")
 
     results  = []
     now      = datetime.now()
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
     acked    = state.setdefault("acked_sensors", {})
-    mappings = [m for m, _ in TRANSITIONING_REQUIRED_ON]
+    mappings = [m for m, _ in required]
 
     ph = ",".join(["%s"] * len(mappings))
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
@@ -2167,7 +2218,7 @@ def check_transitioning_devices(conn, state: dict) -> list:
             mappings)
         rows = {r["mapping"]: r for r in cur.fetchall()}
 
-    label_map = dict(TRANSITIONING_REQUIRED_ON)
+    label_map = dict(required)
     for mapping in mappings:
         row = rows.get(mapping)
         if row is None or row["value"]:
@@ -2182,12 +2233,12 @@ def check_transitioning_devices(conn, state: dict) -> list:
 
         state["last_alert_time"][mapping] = now.isoformat()
         label = label_map[mapping]
-        msg = (f":rotating_light: *CRITICAL — {label} is OFF during TRANSITIONING* :rotating_light:\n"
-               f"The {label.lower()} must stay *ON* while the fridge is cooling down or warming up.\n"
+        msg = (f":rotating_light: *CRITICAL — {label} is OFF during TRANSITIONING{dir_label}* :rotating_light:\n"
+               f"The {label.lower()} must stay *ON* while the fridge is {dir_verb}.\n"
                f"Turned OFF at: {row['time']}\n"
                f"_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
         results.append((mapping, msg))
-        log.critical(f"TRANSITIONING device OFF: {mapping}")
+        log.critical(f"TRANSITIONING device OFF ({direction}): {mapping}")
 
     return results
 
