@@ -2355,10 +2355,10 @@ def _cmd_pulsetube_status(reply_ts: str, conn=None):
     running = bool(js.get("bCompressorRunning"))
     icon    = ":large_green_circle:" if running else ":red_circle:"
 
-    def _K(f):
-        v = js.get(f);  return f"{v:.1f} K"    if v is not None else "—"
-    def _kPa(f):
-        v = js.get(f);  return f"{v/1000:.1f} kPa" if v is not None else "—"
+    def _C(f):   # Kelvin → Celsius
+        v = js.get(f);  return f"{v - 273.15:.1f} °C" if v is not None else "—"
+    def _psi(f):  # Pa → psi
+        v = js.get(f);  return f"{v / 6894.757:.1f} psi" if v is not None else "—"
     def _A(f):
         v = js.get(f);  return f"{v:.1f} A"    if v is not None else "—"
 
@@ -2369,10 +2369,10 @@ def _cmd_pulsetube_status(reply_ts: str, conn=None):
         + (f"   ·   {hours:.0f} h total operation" if hours is not None else ""),
         "",
         "*Temperatures:*",
-        f"  • Coolant In: `{_K('fCoolantInTemp')}`    Coolant Out: `{_K('fCoolantOutTemp')}`",
-        f"  • Oil: `{_K('fOilTemp')}`    Helium: `{_K('fHeliumTemp')}`",
+        f"  • Coolant In: `{_C('fCoolantInTemp')}`    Coolant Out: `{_C('fCoolantOutTemp')}`",
+        f"  • Oil: `{_C('fOilTemp')}`    Helium: `{_C('fHeliumTemp')}`",
         "*Pressures:*",
-        f"  • High: `{_kPa('fHighPressure')}`    Low: `{_kPa('fLowPressure')}`",
+        f"  • High: `{_psi('fHighPressure')}`    Low: `{_psi('fLowPressure')}`",
         "*Motor:*",
         f"  • Current: `{_A('fMotorCurrent')}`",
     ]
