@@ -95,7 +95,7 @@ AIR_PRESSURE_ALARMS = {
     },
     "fRegulatorAirPressure": {
         "label": "Compressed Air — Regulator Pressure",
-        "normal": 492_000, "warn_below": None, "crit_below": 485_000,
+        "normal": 492_000, "warn_below": None, "crit_below": 479_000,
         "unit": "kPa", "scale": 0.001,
     },
 }
