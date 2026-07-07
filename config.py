@@ -61,7 +61,7 @@ THRESHOLDS_COLD = {
     "P1_PRESSURE":         (0.02,   None,  "P1 return pressure > 20 mbar"),
     "P2_PRESSURE":         (5e-4,   None,  "P2 still pressure > 0.5 mbar"),
     "P5_PRESSURE":         (0.01,   None,  "P5 MXC pressure > 0.01 bar (10 mbar)"),
-    "FLOW_VALUE":          (None,   0.002, "He flow < 0.002 mmol/s"),
+    "FLOW_VALUE":          (0.002,  None,  "He flow > 0.002 mmol/s"),
 }
 
 # Backwards-compatible alias
