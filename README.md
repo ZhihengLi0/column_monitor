@@ -905,9 +905,10 @@ Behaviour:
 - Re-alerts when the active-fault set changes or after the cooldown (`ALERT_COOLDOWN_MINUTES`); clears automatically when the device returns to healthy.
 - Per-device + per-severity acknowledgement — reply `silent for 2h` in the thread to snooze just that fault.
 - Benign, noisy gauge flags (pressure-gauge under/over-range) are ignored via `config.DEVICE_FLAG_IGNORE`.
+- **Only-when-running:** a device's operational fault flags are evaluated only while it is running (`bCompressorRunning` / `bPumpOnOff`). The pulse-tube compressor's coolant/oil/helium/pressure/current limits therefore fire **only when the pulse tube is ON** — when it is intentionally off, those readings are ignored (device-level comms faults are still reported).
 - New devices added by BlueFors are picked up automatically — no code changes needed.
 
-This uses the manufacturers' own limits (e.g. Cryomech pulse-tube fault flags), so no manual thresholds are required. The pulse-tube compressor JSON also exposes analog diagnostics (coolant-in/out, oil, helium temperatures in K; low/high pressure in Pa; motor current in A).
+This uses the **manufacturers' own factory limits** (e.g. Cryomech's built-in fault flags — no numeric thresholds are exposed in the data, so there is nothing to tune). Each of the pulse-tube parameters — coolant-in, coolant-out, oil, helium temperature; high and low pressure; motor current — has both a **CRITICAL** (`bError…`) and a **WARNING** (`bWarning…`) factory limit. The pulse-tube compressor JSON also exposes the raw analog diagnostics (temperatures in K; low/high pressure in Pa; motor current in A).
 
 ### Compressed-air pressure alerts (GHS)
 

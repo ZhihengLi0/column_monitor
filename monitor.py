@@ -2545,10 +2545,23 @@ def check_air_pressure(conn, state: dict) -> list:
     return results
 
 
+def _device_running(js: dict):
+    """Return True/False if the device exposes an on/off indicator, else None.
+    Used to only evaluate operational fault flags while the device is running
+    (e.g. the pulse-tube compressor's coolant/oil/He/pressure/current limits
+    only make sense with the compressor ON)."""
+    for k in ("bCompressorRunning", "bPumpOnOff", "bRunning"):
+        if k in js:
+            return bool(js[k])
+    return None
+
+
 def _device_faults(js: dict) -> tuple:
     """From a device_states JSON blob, return (errors, warnings) as lists of
     human-readable strings, combining statusInfo and per-device bError/bWarning
-    flags (skipping benign flags in config.DEVICE_FLAG_IGNORE)."""
+    flags (skipping benign flags in config.DEVICE_FLAG_IGNORE). The operational
+    bError/bWarning flags are only evaluated while the device is running — when
+    it is explicitly off, only device-level statusInfo faults are reported."""
     ignore = getattr(config, "DEVICE_FLAG_IGNORE", ())
     def _benign(flag):
         low = flag.lower()
@@ -2557,13 +2570,14 @@ def _device_faults(js: dict) -> tuple:
     si = js.get("statusInfo") or {}
     errors   = [str(e) for e in (si.get("errors")   or [])]
     warnings = [str(w) for w in (si.get("warnings") or [])]
-    for k, v in js.items():
-        if v is not True or _benign(k):
-            continue
-        if k.startswith("bError"):
-            errors.append(_humanize_flag(k))
-        elif k.startswith("bWarning"):
-            warnings.append(_humanize_flag(k))
+    if _device_running(js) is not False:       # running, or no on/off indicator
+        for k, v in js.items():
+            if v is not True or _benign(k):
+                continue
+            if k.startswith("bError"):
+                errors.append(_humanize_flag(k))
+            elif k.startswith("bWarning"):
+                warnings.append(_humanize_flag(k))
     if si.get("errorBit") and not errors:
         errors.append("error bit set")
     if si.get("warningBit") and not warnings:
