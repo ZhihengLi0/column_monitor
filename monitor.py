@@ -1810,7 +1810,7 @@ def _cmd_temperature(reply_ts: str, conn=None):
             if prefer_mk and v < 1.0:
                 lines.append(f"  *{label}*: `{v*1000:.2f} mK`  _(at {ts})_")
             else:
-                lines.append(f"  *{label}*: `{v:.4g} K`  _(at {ts})_")
+                lines.append(f"  *{label}*: `{v:.4g} K` (`{v-273.15:.1f} °C`)  _(at {ts})_")
 
     send_slack("\n".join(lines), color="#2196F3", thread_ts=reply_ts)
     log.info("Sent temperature reading reply to Slack")
