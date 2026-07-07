@@ -920,6 +920,12 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
         _cmd_valve_status(reply_ts, conn)
         return
 
+    # Pulse tube compressor readings — "pulse tube status", "pulsetube ...", "pt status"
+    if not lower.startswith("plot") and (
+            re.search(r"pulse\s*tube|pulsetube", lower) or re.fullmatch(r"pt\s+status", lower)):
+        _cmd_pulsetube_status(reply_ts, conn)
+        return
+
     # ── Plot parser: handles 1 or multiple sensors + time range or duration ──
     if lower.startswith("plot"):
         _TIME_PAT_RE = re.compile(r"^(\d{6}_\d{4})$")
@@ -1820,6 +1826,7 @@ def _cmd_help(reply_ts=None):
         "`pressure reading` — show latest P1–P7 pressure values\n"
         "`pump status` — show on/off, power, speed for all 5 pumps (B1A, B2, R1A, R2, COM)\n"
         "`heater status` — show on/off and power for Still/MXC heat switches and heaters\n"
+        "`pulse tube status` — compressor coolant/oil/He temps, high/low pressure, current + faults\n"
         "`plot <sensor>` — plot last 30 min of data as image (e.g. `plot P1`, `plot MXC`)\n"
         "`plot <sensor> <N>min` — plot last N minutes (e.g. `plot P5 60min`)\n"
         "`plot <sensor> YYMMDD_HHMM YYMMDD_HHMM` — plot custom time range in CDT (e.g. `plot P1 260622_0000 260622_1200`)\n"
@@ -2333,6 +2340,55 @@ def _cmd_heater_status(reply_ts: str, conn=None):
 
     send_slack("\n".join(lines), color="#cc6600", thread_ts=reply_ts)
     log.info("Sent heater status reply to Slack")
+
+
+def _cmd_pulsetube_status(reply_ts: str, conn=None):
+    """Show the pulse-tube compressor's live readings and any active faults."""
+    if conn is None:
+        send_slack("Cannot read pulse tube status: no database connection.", thread_ts=reply_ts)
+        return
+    js = _latest_device_state(conn, "plc.Pulsetube1")
+    if not js:
+        send_slack("No pulse tube data available.", thread_ts=reply_ts)
+        return
+
+    running = bool(js.get("bCompressorRunning"))
+    icon    = ":large_green_circle:" if running else ":red_circle:"
+
+    def _K(f):
+        v = js.get(f);  return f"{v:.1f} K"    if v is not None else "—"
+    def _kPa(f):
+        v = js.get(f);  return f"{v/1000:.1f} kPa" if v is not None else "—"
+    def _A(f):
+        v = js.get(f);  return f"{v:.1f} A"    if v is not None else "—"
+
+    hours = js.get("fHoursOfOperation")
+    lines = [
+        ":cyclone: *Pulse Tube Compressor*\n",
+        f"{icon} *{'RUNNING' if running else 'OFF'}*"
+        + (f"   ·   {hours:.0f} h total operation" if hours is not None else ""),
+        "",
+        "*Temperatures:*",
+        f"  • Coolant In: `{_K('fCoolantInTemp')}`    Coolant Out: `{_K('fCoolantOutTemp')}`",
+        f"  • Oil: `{_K('fOilTemp')}`    Helium: `{_K('fHeliumTemp')}`",
+        "*Pressures:*",
+        f"  • High: `{_kPa('fHighPressure')}`    Low: `{_kPa('fLowPressure')}`",
+        "*Motor:*",
+        f"  • Current: `{_A('fMotorCurrent')}`",
+    ]
+
+    errors, warnings = _device_faults(js)
+    if errors:
+        lines.append("\n:rotating_light: *Faults (critical):* " + ", ".join(errors))
+    if warnings:
+        lines.append(":warning: *Warnings:* " + ", ".join(warnings))
+    if not errors and not warnings:
+        note = "within factory limits" if running else "compressor off — limits not checked"
+        lines.append(f"\n:white_check_mark: No active faults ({note}).")
+
+    color = "good" if (running and not errors and not warnings) else ("danger" if errors else "#cc6600")
+    send_slack("\n".join(lines), color=color, thread_ts=reply_ts)
+    log.info("Sent pulse tube status reply to Slack")
 
 
 # ── Valve status command ──────────────────────────────────────────────────────
