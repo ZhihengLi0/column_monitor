@@ -1784,7 +1784,8 @@ def _cmd_pressure(reply_ts: str, conn=None):
 
 def _cmd_temperature(reply_ts: str, conn=None):
     TEMP_SENSORS = [
-        ("MXC_TEMPERATURE",     "MXC",   True),
+        ("MXC_TEMPERATURE",     "MXC1",  True),
+        ("MXC_TEMPERATURE_FAR", "MXC2",  True),
         ("STILL_TEMPERATURE",   "Still", True),
         ("4K_TEMPERATURE",      "4K",    False),
         ("50K_TEMPERATURE",     "50K",   False),
@@ -1822,7 +1823,7 @@ def _cmd_help(reply_ts=None):
         "  React ✅  👏  👍  🤙 on the alert, or reply `ok` / `OK` in the thread\n\n"
         "*@mention commands* (`@BlueFors-Alert <command>`):\n"
         "`help` — show this message\n"
-        "`temperature reading` — show current temperatures (MXC, Still, 4K, 50K, B1A, B2)\n"
+        "`temperature reading` — show current temperatures (MXC1, MXC2, Still, 4K, 50K, B1A, B2)\n"
         "`pressure reading` — show latest P1–P7 pressure values\n"
         "`pump status` — show on/off, power, speed for all 5 pumps (B1A, B2, R1A, R2, COM)\n"
         "`heater status` — show on/off and power for Still/MXC heat switches and heaters\n"
