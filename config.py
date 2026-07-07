@@ -55,13 +55,13 @@ THRESHOLDS_COLD = {
     "STILL_TEMPERATURE":   (2.0,    None,  "Still temperature > 2 K"),
     "4K_TEMPERATURE":      (6.0,    None,  "4K plate > 6 K"),
     "50K_TEMPERATURE":     (65.0,   None,  "50K plate > 65 K"),
-    "B1A_TEMPERATURE":     (1.0,    None,  "B1A stage > 1 K"),
-    "B2_TEMPERATURE":      (4.5,    None,  "B2 stage > 4.5 K"),
+    "B1A_TEMPERATURE":     (315.0,  None,  "B1A pump temperature > 315 K (overheat)"),
+    "B2_TEMPERATURE":      (315.0,  None,  "B2 pump temperature > 315 K (overheat)"),
     # Pressures in bar (database native unit); 1 mbar = 0.001 bar
     "P1_PRESSURE":         (0.02,   None,  "P1 return pressure > 20 mbar"),
     "P2_PRESSURE":         (5e-4,   None,  "P2 still pressure > 0.5 mbar"),
-    "P5_PRESSURE":         (1e-6,   None,  "P5 MXC pressure > 1e-3 mbar"),
-    "FLOW_VALUE":          (None,   0.01,  "He flow < 0.01 mmol/s"),
+    "P5_PRESSURE":         (0.01,   None,  "P5 MXC pressure > 0.01 bar (10 mbar)"),
+    "FLOW_VALUE":          (None,   0.002, "He flow < 0.002 mmol/s"),
 }
 
 # Backwards-compatible alias
