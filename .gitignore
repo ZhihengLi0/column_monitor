@@ -4,3 +4,5 @@ __pycache__/
 *.lock
 *.pyc
 config_secret.py
+# Windows-side helper that embeds the DB password — keep local only
+windows_sync_push.py

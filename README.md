@@ -79,13 +79,19 @@ The fridge is not always running. To avoid sending meaningless alerts while the 
 
 | Mode | Emoji | Trigger | What is monitored |
 |---|---|---|---|
-| **IDLE** | ⚪ | 50K plate > 200 K | Idle pressure checks + CS2 system alerts |
-| **TRANSITIONING** | 🔵 | 50K plate between 80 K and 200 K | CS2 system alerts only — all threshold alerts suppressed |
-| **COLD** | 🟢 | 50K plate < 80 K | Full sensor threshold monitoring |
+| **IDLE** | ⚪ | 50K plate > 200 K | Idle pressure checks + cold cathode + CS2 system alerts |
+| **TRANSITIONING** | 🔵 | 50K plate between 80 K and 200 K | Pulse-tube critical check (see below) + CS2 system alerts; threshold alerts suppressed |
+| **COLD** | 🟢 | 50K plate < 80 K | Full sensor threshold monitoring + cold cathode |
+
+> **Always on (every mode):** device on/off changes, R1A pump, valves V112/V113/V114, CS2 alerts, cold-cathode, data-freshness, **compressed-air pressure**, and **per-device health faults** (see [Device Health Monitoring](#device-health-monitoring)).
 
 ### Why TRANSITIONING suppresses alerts
 
 During cool-down and warm-up the temperatures and pressures pass through a huge range of values. Without suppression, the monitor would send hundreds of threshold alerts as sensors cross their limits on the way to base temperature. TRANSITIONING mode keeps Slack quiet and only forwards genuine CS2 system errors.
+
+### TRANSITIONING: pulse-tube critical check + direction
+
+TRANSITIONING is split by **direction**, auto-detected from the 50K-plate trend over ~15 minutes (falling = *cool down*, rising = *warm up*). In either direction the **Pulse Tube must stay ON** — if it turns OFF, a **CRITICAL** alert fires (state-based, so it fires even if it was already off, and repeats every cooldown until fixed). The detected direction is shown in the alert, in `status`, and in the alarm listing. Requirements are configurable per direction via `TRANSITIONING_REQUIRED` in `monitor.py`.
 
 ### Mode change notifications
 
@@ -797,8 +803,15 @@ React to any alert message with **✅ 👏 👍 🤙**, or reply `ok` / `OK` in 
 | `heater status` | Still/MXC heat switches and heaters — on/off and power |
 | `valve status` | All 25 valves grouped by open/closed state with last-change timestamp |
 | `list` | All sensors with numbers, short names, and current thresholds |
-| `status` | Current mode, active threshold overrides, silenced sensors |
+| `status` | Current mode (+ cool-down/warm-up direction), active threshold overrides, silenced sensors |
 | `mode` | Current operating mode |
+| `what is the alarm` | List **every** configured alarm and its exact trigger criteria, grouped by mode |
+| `what is current alarm criteria` | Trigger criteria for the **current** mode only |
+| `what alarms in cold mode` | Alarms for one mode (`idle` / `cold` / `transitioning`) |
+| `filter status` | Days until the chilled-water filter is due for replacement |
+| `I have changed the filter` | Confirm filter replaced — restarts the 3-week reminder timer |
+
+`MC` is accepted everywhere as an alias for `MXC` (mixing chamber): `plot mc`, `change mc to 0.035`, etc.
 
 #### Plots
 
@@ -823,11 +836,13 @@ Temperature plots auto-convert to mK when all values are below 1 K (e.g. MXC at 
 | `plot 12h` | Plot the last sensor at a new duration |
 | `plot it` / `plot again` | Plot the last sensor again |
 
-#### Acknowledgement
+#### Acknowledgement & silencing
 
 | Command | Description |
 |---|---|
 | `ack` | Silence ALL sensors for 10 minutes |
+| *(reply in an alert thread)* `ok` / ✅ | Silence that one sensor for 10 minutes |
+| *(reply in an alert thread)* `silent for 2h` | Silence that one sensor for any duration — `mute 30min`, `silence 3 days`, `silent forever` (min / hour / day, English or Chinese) |
 
 #### Mode control
 
@@ -836,6 +851,7 @@ Temperature plots auto-convert to mK when all values are below 1 K (e.g. MXC at 
 | `set mode auto` | Return to automatic mode detection (50K temperature) |
 | `set mode idle` | Force IDLE mode (pressure checks only) |
 | `set mode cold` | Force COLD mode (full threshold monitoring) |
+| `set mode transitioning` | Force TRANSITIONING mode (cooling/warming — threshold alerts off, pulse-tube check on) |
 
 #### Threshold changes (mode-specific)
 
@@ -869,6 +885,43 @@ The bot monitors **V112, V113, and V114** continuously and sends an automatic Sl
 > :valve: V112 changed: **OPEN** → **CLOSED** _(at 2026-06-29 14:23)_
 
 This is separate from `valve status` (which shows all 25 valves on demand). Alerts fire on every state change with no cooldown.
+
+---
+
+### Device Health Monitoring
+
+Every device in the `device_states` table (≈50 devices: pulse-tube compressor, helium compressor, rough/turbo pumps, pressure gauges P1–P7, all valves, GHS, LEDs, …) is checked **in every mode**, every cron cycle, from a single query. Each device publishes its own health in its JSON snapshot, and the monitor raises:
+
+- **CRITICAL** 🚨 — if the device reports an error: `statusInfo.errors` / `statusInfo.errorBit`, or any `bError…` flag is true.
+- **WARNING** ⚠️ — if it reports a warning: `statusInfo.warnings` / `statusInfo.warningBit`, or any `bWarning…` flag is true.
+
+Flag names are humanised (`bErrorOilRunningHigh` → "Oil Running High") and the device's friendly name (`instrumentInfo.name`) is used. Example:
+
+> 🚨 **CRITICAL — Pulse tube 1: error** 🚨
+> &nbsp;&nbsp;&nbsp;&nbsp;• Oil Running High
+
+Behaviour:
+- Re-alerts when the active-fault set changes or after the cooldown (`ALERT_COOLDOWN_MINUTES`); clears automatically when the device returns to healthy.
+- Per-device + per-severity acknowledgement — reply `silent for 2h` in the thread to snooze just that fault.
+- Benign, noisy gauge flags (pressure-gauge under/over-range) are ignored via `config.DEVICE_FLAG_IGNORE`.
+- New devices added by BlueFors are picked up automatically — no code changes needed.
+
+This uses the manufacturers' own limits (e.g. Cryomech pulse-tube fault flags), so no manual thresholds are required. The pulse-tube compressor JSON also exposes analog diagnostics (coolant-in/out, oil, helium temperatures in K; low/high pressure in Pa; motor current in A).
+
+### Compressed-air pressure alerts (GHS)
+
+The gas-handling-system compressed air is monitored in every mode from `device_states` (device `plc.GHSDiagnostics`), with two levels (thresholds stored in Pa, displayed in kPa; configurable in `config.AIR_PRESSURE_ALARMS`):
+
+| Line | Field | Normal | Warning | Critical |
+|---|---|---|---|---|
+| Input air | `fInputAirPressure` | 690 kPa | < 620 kPa | < 540 kPa |
+| Regulator air | `fRegulatorAirPressure` | 492 kPa | — | < 485 kPa |
+
+Escalation (warning → critical) fires immediately, bypassing the cooldown; recovery clears the state.
+
+### Chilled-water filter reminder
+
+Counting from first run, every **3 weeks** (`FILTER_INTERVAL_DAYS`) the bot posts a replacement reminder and then repeats it every **10 minutes** (all in one thread) until someone replies that it was changed — e.g. `I have changed it`, `filter replaced`, `已经更换`. Note: `ok` / `yes` deliberately do **not** stop it. Confirmation restarts the timer. This reminder runs independently of `pause alerts` / `ack`. Check remaining time any time with `filter status`.
 
 ---
 
@@ -1216,8 +1269,9 @@ During cool-down the 50K temperature should pass through the TRANSITIONING band 
 | `sync_push.ps1` | Windows `C:\bluefors_monitor\` | Pushes CS2 data to Pi every minute |
 | `win_sync_state.json` | Windows `C:\bluefors_monitor\` | Tracks last synced row ID per table (auto-generated) |
 | `win_sync.log` | Windows `C:\bluefors_monitor\` | Sync run log (auto-generated) |
-| `config.py` | Pi `/home/cdms/bluefors_monitor/` | All credentials and threshold settings |
-| `monitor.py` | Pi `/home/cdms/bluefors_monitor/` | Alert monitor + Slack command handler (cron every minute; also handles NLP dispatch) |
+| `config.py` | Pi `/home/cdms/bluefors_monitor/` | Threshold settings, air-pressure & filter config, device-flag ignore list. Imports secrets from `config_secret.py` |
+| `config_secret.py` | Pi `/home/cdms/bluefors_monitor/` | **Local only, git-ignored** — DB password and Slack bot token |
+| `monitor.py` | Pi `/home/cdms/bluefors_monitor/` | Alert monitor + Slack command handler (cron every minute; threshold/device-health/air-pressure/filter checks; NLP dispatch) |
 | `slack_responder.py` | Pi `/home/cdms/bluefors_monitor/` | Fast Slack responder — polls every 5 s for instant command replies; runs as background process |
 | `nlp_intent.py` | Pi `/home/cdms/bluefors_monitor/` | Local NLP classifier (TF-IDF + Logistic Regression); bilingual intent classification and entity extraction |
 | `nlp_user_examples.jsonl` | Pi `/home/cdms/bluefors_monitor/` | User-corrected training examples accumulated via self-learning (auto-generated; do not delete) |
@@ -1277,6 +1331,15 @@ This release series marks a fundamental shift: the bot moves from rigid command 
 | 3.3.0 | [v3.3.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.3.0) | **Valve status + device-specific NLP routing** — `valve status` command shows all 25 valves grouped open/closed with last-change timestamps; automatic Slack alerts on V112/V113/V114 state changes (active in both COLD and IDLE modes). NLP classifier upgraded to 14 intents and now understands device-specific queries: "what is the status of R2", "is V112 open" — routes to `pump status` or `valve status` and highlights the queried device first in the reply |
 | 3.4.0 | [v3.4.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.4.0) | **Temperature reading + plot improvements** — `temperature reading` command shows MXC/Still/4K/50K/B1A/B2 with automatic mK conversion when cold. Temperature plots auto-convert y-axis to mK when all values < 1 K. Plot duration parser now accepts natural language ("recent 2 hours", "2.15h", "last 30 minutes"). NLP confirmation: replying `yes` to hint message saves a positive training example. Fixed daily summary cron (was firing at 1 AM/1 PM CDT instead of 8 AM/8 PM CDT) |
 | 3.5.0 | [v3.5.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.5.0) | **Global alert pause/resume** — `pause alerts` stops all Slack notifications while background monitoring continues; `resume alerts` re-enables. NLP understands natural language ("stop all alerts", "mute alerts", "暂停报警"). Bot confirms the action immediately. Separated from `sentinel` (CS2-only toggle) |
+| 3.6.0 | [v3.6.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.6.0) | **Flexible silencing, aliases & reliability** — reply `silent for 2h` / `mute 30min` / `silence 3 days` / `silent forever` in an alert thread to snooze just that sensor for any duration (min/hour/day, EN + 中文); `set mode transitioning` command; `MC` accepted as an alias for `MXC`; automatic alerts when the **B1A/B2 turbo pumps** turn on/off; `fcntl` file lock on the state file to prevent corruption and lost updates |
+| 3.7.0 | [v3.7.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.7.0) | **Alarm criteria query + chilled-water filter reminder** — `what is the alarm` lists every configured alarm with its exact trigger criterion grouped by mode; `what alarms in cold mode` / `what is current alarm criteria` scope it. Plus a filter-replacement reminder: every 3 weeks, repeated every 10 min until someone replies "I have changed it" (`ok` does not count); `filter status` command; independent of pause/ack |
+| 3.8.0 | [v3.8.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v3.8.0) | **TRANSITIONING pulse-tube critical check** — the Pulse Tube must stay ON while cooling/warming or a CRITICAL alert fires (state-based, repeats until fixed). Direction (cool down vs warm up) is auto-detected from the 50K-plate trend and shown in alerts / `status` / the alarm listing. Per-direction requirements configurable via `TRANSITIONING_REQUIRED` |
+
+### v4.x — Whole-system device health monitoring (major milestone)
+
+| Version | Tag | Description |
+|---------|-----|-------------|
+| 4.0.0 | [v4.0.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.0.0) | **Per-device health monitoring for every device** — a single generic check reads the `device_states` JSON for all ~50 devices and raises CRITICAL on any error flag (`statusInfo.errors`/`errorBit`/`bError*`) and WARNING on any warning flag (`statusInfo.warnings`/`warningBit`/`bWarning*`), using each manufacturer's own limits (pulse-tube & helium compressors, rough/turbo pumps, pressure gauges, valves, GHS, …). Flag names humanised; benign gauge under/over-range ignored; per-device+severity ack; new devices auto-covered. Adds **GHS compressed-air low-pressure alarms** (input < 620/540 kPa, regulator < 485 kPa) read from `device_states` in Pa. Discovered these diagnostics were already local (in `device_states`), so no extra sync was needed |
 
 ---
 
