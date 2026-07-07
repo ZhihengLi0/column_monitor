@@ -80,8 +80,8 @@ MODE_DESC = {
         "Monitoring: idle pressure checks + CS2 system alerts.",
     "TRANSITIONING":
         "System is *cooling down or warming up*.\n"
-        "Threshold alerts suppressed, but Pulse Tube + Still/MXC heat switches\n"
-        "are checked — a *critical* alert fires if any of them turns OFF.",
+        "Threshold alerts suppressed, but the Pulse Tube is checked —\n"
+        "a *critical* alert fires if it turns OFF.",
     "COLD":
         "System is *cold and operational*.\n"
         "Full sensor threshold monitoring active.",
@@ -2113,12 +2113,11 @@ DEVICE_ALERT_MAPPINGS = HEATER_MAPPINGS + [
     ("B2_ENABLED",         "B2 Turbo Pump"),
 ]
 
-# Devices that MUST stay ON while the fridge is cooling down / warming up.
-# If any of these is OFF during TRANSITIONING, raise a CRITICAL alert.
+# Device that MUST stay ON while the fridge is cooling down / warming up.
+# If the pulse tube is OFF during TRANSITIONING, raise a CRITICAL alert.
+# (Heat switches still get normal on/off change alerts via check_heater_status.)
 TRANSITIONING_REQUIRED_ON = [
-    ("PULSE_TUBE_ENABLED",       "Pulse Tube"),
-    ("HEATSWITCH_STILL_ENABLED", "Still Heat Switch"),
-    ("HEATSWITCH_MXC_ENABLED",   "MXC Heat Switch"),
+    ("PULSE_TUBE_ENABLED", "Pulse Tube"),
 ]
 
 
@@ -2146,10 +2145,10 @@ def check_heater_status(conn, state: dict) -> list:
 
 
 def check_transitioning_devices(conn, state: dict) -> list:
-    """During TRANSITIONING, the pulse tube and both heat switches MUST be ON.
-    If any is OFF, raise a CRITICAL alert. State-based (not change-based), so it
-    fires even if the device was already off before the mode was entered, and
-    keeps reminding every cooldown while still off. Respects per-device ack."""
+    """During TRANSITIONING, the pulse tube MUST stay ON. If it is OFF, raise a
+    CRITICAL alert. State-based (not change-based), so it fires even if it was
+    already off before the mode was entered, and keeps reminding every cooldown
+    while still off. Respects per-device ack."""
     if state.get("current_mode") != "TRANSITIONING":
         return []
 
@@ -2638,7 +2637,7 @@ def run():
 
         all_alerts.extend(check_sensor_thresholds(conn, state))
 
-        # TRANSITIONING: pulse tube + heat switches must stay ON (critical)
+        # TRANSITIONING: pulse tube must stay ON (critical)
         all_alerts.extend(check_transitioning_devices(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
