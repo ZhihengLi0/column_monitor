@@ -1917,9 +1917,13 @@ def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
             parts.append(f"*CRITICAL* < {cfg['crit_below']*s:g}")
         lines.append(f"  • *{cfg['label']}* low — {', '.join(parts)} {u} "
                      f"(normal ~{cfg['normal']*s:g} {u})")
-    lines.append("  • *Any device fault* — every device in the system is checked; "
-                 "an error → *CRITICAL*, a warning → WARNING (pulse tube, compressor, "
-                 "pumps, gauges, valves, GHS, …)")
+    lines.append("  • *Pulse-tube compressor* (checked only while running) — each of "
+                 "*coolant-in, coolant-out, oil, helium temperature; high & low pressure; "
+                 "motor current* has factory CRITICAL and WARNING limits (Cryomech built-in "
+                 "fault flags): error → *CRITICAL*, warning → WARNING")
+    lines.append("  • *Any other device fault* — every device is checked; "
+                 "an error → *CRITICAL*, a warning → WARNING (helium compressor, "
+                 "pumps, pressure gauges, valves, GHS, …)")
 
     lines.append(f"\n_Same alarm repeats at most every {config.ALERT_COOLDOWN_MINUTES} min "
                  "(cooldown). Reply `silent for 2h` under an alert, or `ack` to hush all._")
