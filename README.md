@@ -801,6 +801,7 @@ React to any alert message with **✅ 👏 👍 🤙**, or reply `ok` / `OK` in 
 | `pressure reading` | Latest P1–P7 pressures + Cold Cathode ON/OFF |
 | `pump status` | B1A, B2 (turbo), R1A, R2 (scroll), COM compressor — on/off, speed, power, temp |
 | `heater status` | Still/MXC heat switches and heaters — on/off and power |
+| `pulse tube status` | Pulse-tube compressor — coolant-in/out, oil, helium temps (°C); high/low pressure (psi); motor current (A); running state + active faults |
 | `valve status` | All 25 valves grouped by open/closed state with last-change timestamp |
 | `list` | All sensors with numbers, short names, and current thresholds |
 | `status` | Current mode (+ cool-down/warm-up direction), active threshold overrides, silenced sensors |
@@ -1342,6 +1343,9 @@ This release series marks a fundamental shift: the bot moves from rigid command 
 | Version | Tag | Description |
 |---------|-----|-------------|
 | 4.0.0 | [v4.0.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.0.0) | **Per-device health monitoring for every device** — a single generic check reads the `device_states` JSON for all ~50 devices and raises CRITICAL on any error flag (`statusInfo.errors`/`errorBit`/`bError*`) and WARNING on any warning flag (`statusInfo.warnings`/`warningBit`/`bWarning*`), using each manufacturer's own limits (pulse-tube & helium compressors, rough/turbo pumps, pressure gauges, valves, GHS, …). Flag names humanised; benign gauge under/over-range ignored; per-device+severity ack; new devices auto-covered. Adds **GHS compressed-air low-pressure alarms** (input < 620/540 kPa, regulator < 485 kPa) read from `device_states` in Pa. Discovered these diagnostics were already local (in `device_states`), so no extra sync was needed |
+| 4.1.0 | [v4.1.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.1.0) | **Plot durations up to years** — the plot duration parser now accepts `days`, `weeks`, `months`, `years` (EN + 中文 天/周/月/年), e.g. `plot P1 P5 for past 30 days`. Fixes long durations being read as minutes; `month`/`mo` disambiguated from bare `m` |
+| 4.2.0 | [v4.2.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.2.0) | **Running-gated device faults + explicit pulse-tube criteria** — operational fault flags are evaluated only while the device is running (`bCompressorRunning`/`bPumpOnOff`), so the pulse-tube compressor's coolant/oil/helium/pressure/current limits fire only while it is ON. The alarm listing now spells out the pulse-tube parameters and their factory CRITICAL/WARNING limits |
+| 4.3.0 | [v4.3.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.3.0) | **`pulse tube status` command** — live compressor readings: coolant-in/out, oil, helium temperatures (°C), high/low pressure (psi), motor current (A), running state, total operating hours, and any active factory-limit faults. Triggered by `pulse tube status` / `pulsetube …` / `pt status` |
 
 ---
 
