@@ -1958,6 +1958,9 @@ def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
     lines.append("  • *Any other device fault* — every device is checked; "
                  "an error → *CRITICAL*, a warning → WARNING (helium compressor, "
                  "pumps, pressure gauges, valves, GHS, …)")
+    lines.append("  • *Coolant-in below dew point* → *CRITICAL* — pulse-tube "
+                 "coolant-in temperature must stay above the dew point (from the "
+                 "LN2 humidity sensor) or the cooling line condenses")
 
     lines.append(f"\n_Same alarm repeats at most every {config.ALERT_COOLDOWN_MINUTES} min "
                  "(cooldown). Reply `silent for 2h` under an alert, or `ack` to hush all._")
@@ -2736,6 +2739,55 @@ def check_device_health(conn, state: dict) -> list:
     return results
 
 
+def check_coolant_dewpoint(conn, state: dict) -> list:
+    """The pulse-tube compressor's coolant-in temperature must stay ABOVE the
+    dew point (from the LN2 humidity sensor), or condensation forms on the
+    cooling-water line. Checked in ALL modes. Fail-safe: if either reading is
+    unavailable, no alarm."""
+    js = _latest_device_state(conn, "plc.Pulsetube1")
+    if not js or js.get("fCoolantInTemp") is None:
+        return []
+    coolant_c = js["fCoolantInTemp"] - 273.15    # K → °C
+
+    try:
+        import sys as _sys
+        if "/home/cdms/ln2_monitor" not in _sys.path:
+            _sys.path.insert(0, "/home/cdms/ln2_monitor")
+        import ln2_query
+        dp_info = ln2_query.latest_dewpoint()
+    except Exception as e:
+        log.debug(f"dew-point unavailable: {e}")
+        return []
+    if not dp_info:
+        return []
+    dp, air_t, hum, _ts = dp_info
+
+    key = "COOLANT_DEWPOINT"
+    if coolant_c >= dp:                          # OK — above dew point
+        state["last_alert_time"].pop(key, None)
+        return []
+
+    now      = datetime.now()
+    cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+    acked    = state.setdefault("acked_sensors", {})
+    ack_until = acked.get(key)
+    if ack_until and datetime.fromisoformat(ack_until) > now:
+        return []
+    last = state["last_alert_time"].get(key)
+    if last and now - datetime.fromisoformat(last) < cooldown:
+        return []
+    state["last_alert_time"][key] = now.isoformat()
+
+    msg = (":rotating_light: *CRITICAL — coolant-in below dew point* :rotating_light:\n"
+           f"Coolant-in temperature `{coolant_c:.1f} °C` is *below* the dew point "
+           f"`{dp:.1f} °C` (air {air_t:.1f} °C / {hum:.0f}% RH).\n"
+           "Condensation will form on the cooling-water line — raise the water "
+           "temperature or lower the room humidity.\n"
+           "_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+    log.critical(f"Coolant-in {coolant_c:.1f}C below dew point {dp:.1f}C")
+    return [(key, msg)]
+
+
 def check_data_freshness(conn, state: dict):
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(time) FROM public.double_value_change_events")
@@ -3053,6 +3105,9 @@ def run():
 
         # Informational cool-down milestones (e.g. 4K plate below 10 K)
         all_alerts.extend(check_cooldown_milestone(conn, state))
+
+        # Coolant-in must stay above the dew point (condensation risk, all modes)
+        all_alerts.extend(check_coolant_dewpoint(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
             all_alerts.append((None, msg))
