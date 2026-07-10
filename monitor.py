@@ -264,52 +264,60 @@ def send_slack(text: str, color: str = "danger", thread_ts: str = None) -> str |
         log.error(f"Slack send failed: {e}")
     return None
 
-def slack_upload_image(img_path: str, title: str, thread_ts: str = None) -> bool:
-    """Upload an image file to Slack using the two-step upload API."""
+def _slack_upload_image_once(img_path: str, title: str, thread_ts: str = None) -> bool:
+    """One attempt at the three-step Slack upload. Returns True on success."""
     path = Path(img_path)
     size = path.stat().st_size
-    try:
-        # Step 1: get upload URL
-        r1 = requests.post(
-            "https://slack.com/api/files.getUploadURLExternal",
-            headers=_headers(),
-            data={"filename": path.name, "length": size},
-            timeout=10)
-        resp1 = r1.json()
-        if not resp1.get("ok"):
-            log.error(f"Slack upload URL error: {resp1.get('error')}")
-            return False
-
-        upload_url = resp1["upload_url"]
-        file_id    = resp1["file_id"]
-
-        # Step 2: upload the file bytes
-        with open(img_path, "rb") as f:
-            r2 = requests.post(upload_url, data=f.read(), timeout=30)
-        if r2.status_code != 200:
-            log.error(f"Slack upload failed: {r2.status_code}")
-            return False
-
-        # Step 3: complete the upload and share to channel
-        payload = {
-            "files": [{"id": file_id, "title": title}],
-            "channel_id": config.SLACK_CHANNEL,
-        }
-        if thread_ts:
-            payload["thread_ts"] = thread_ts
-        r3 = requests.post(
-            "https://slack.com/api/files.completeUploadExternal",
-            headers=_headers(),
-            json=payload,
-            timeout=10)
-        resp3 = r3.json()
-        if not resp3.get("ok"):
-            log.error(f"Slack complete upload error: {resp3.get('error')}")
-            return False
-        return True
-    except Exception as e:
-        log.error(f"Slack image upload failed: {e}")
+    # Step 1: get upload URL
+    r1 = requests.post(
+        "https://slack.com/api/files.getUploadURLExternal",
+        headers=_headers(),
+        data={"filename": path.name, "length": size},
+        timeout=15)
+    resp1 = r1.json()
+    if not resp1.get("ok"):
+        log.error(f"Slack upload URL error: {resp1.get('error')}")
         return False
+    upload_url = resp1["upload_url"]
+    file_id    = resp1["file_id"]
+
+    # Step 2: upload the file bytes (larger timeout — slow uplinks)
+    with open(img_path, "rb") as f:
+        r2 = requests.post(upload_url, data=f.read(), timeout=60)
+    if r2.status_code != 200:
+        log.error(f"Slack upload failed: {r2.status_code}")
+        return False
+
+    # Step 3: complete the upload and share to channel
+    payload = {
+        "files": [{"id": file_id, "title": title}],
+        "channel_id": config.SLACK_CHANNEL,
+    }
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    r3 = requests.post(
+        "https://slack.com/api/files.completeUploadExternal",
+        headers=_headers(), json=payload, timeout=15)
+    resp3 = r3.json()
+    if not resp3.get("ok"):
+        log.error(f"Slack complete upload error: {resp3.get('error')}")
+        return False
+    return True
+
+
+def slack_upload_image(img_path: str, title: str, thread_ts: str = None) -> bool:
+    """Upload an image to Slack with retries on transient network errors. On
+    final failure, posts a short text notice so the user isn't left with silence."""
+    for attempt in range(1, 4):
+        try:
+            if _slack_upload_image_once(img_path, title, thread_ts):
+                return True
+        except Exception as e:
+            log.error(f"Slack image upload attempt {attempt}/3 failed: {e}")
+        time.sleep(2 * attempt)
+    send_slack(f":warning: Couldn't upload the plot image (*{title}*) — Slack network "
+               "timeout. Please try again.", color="warning", thread_ts=thread_ts)
+    return False
 
 
 # ── Mode detection ────────────────────────────────────────────────────────────
