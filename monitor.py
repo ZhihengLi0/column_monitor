@@ -959,6 +959,17 @@ def _execute_command(text: str, reply_ts: str, state: dict, conn=None, user_id: 
 
     # ── Plot parser: handles 1 or multiple sensors + time range or duration ──
     if lower.startswith("plot"):
+        # Pulse-tube compressor quantities (coolant in/out, oil, He, high/low
+        # pressure, motor current) come from pulsetube_readings, not the sensor
+        # channels — handle them first.
+        pt = _match_pulsetube_quantity(lower)
+        if pt:
+            col, label, kind = pt
+            dm = _PLOT_DUR_RE.search(lower)
+            mins = _plot_unit_minutes(float(dm.group(1)), dm.group(2)) if dm else 120
+            _cmd_plot_pulsetube(col, label, kind, reply_ts, conn, minutes=mins)
+            return
+
         _TIME_PAT_RE = re.compile(r"^(\d{6}_\d{4})$")
         tokens = lower.split()[1:]   # everything after "plot"
         sensor_keys, time_tokens, minutes = [], [], 30
@@ -1859,6 +1870,7 @@ def _cmd_help(reply_ts=None):
         "`pump status` — show on/off, power, speed for all 5 pumps (B1A, B2, R1A, R2, COM)\n"
         "`heater status` — show on/off and power for Still/MXC heat switches and heaters\n"
         "`pulse tube status` — compressor coolant/oil/He temps, high/low pressure, current + faults\n"
+        "`plot coolant in 2h` — plot recorded pulse-tube values (coolant in/out, oil, helium, high/low pressure, motor current)\n"
         "\n*Liquid nitrogen scale* (natural language OK):\n"
         "`ln2` / `how much liquid nitrogen` / `液氮还剩多少` — current weight, temp, humidity + 1 h trend\n"
         "`plot ln2 weight 6h` / `液氮曲线 2h` — weight-vs-time chart (min/hour/day)\n\n"
@@ -2459,6 +2471,93 @@ def _cmd_pulsetube_status(reply_ts: str, conn=None):
     color = "good" if (running and not errors and not warnings) else ("danger" if errors else "#cc6600")
     send_slack("\n".join(lines), color=color, thread_ts=reply_ts)
     log.info("Sent pulse tube status reply to Slack")
+
+
+# ── Pulse-tube recording + plotting ───────────────────────────────────────────
+# device_states keeps only the latest snapshot, so we log the compressor's analog
+# values to pulsetube_readings each cron cycle to build history for plotting.
+
+def record_pulsetube(conn, state: dict = None) -> None:
+    """Append the current pulse-tube compressor analog values to
+    pulsetube_readings (time series for plotting)."""
+    js = _latest_device_state(conn, "plc.Pulsetube1")
+    if not js:
+        return
+    vals = (js.get("fCoolantInTemp"), js.get("fCoolantOutTemp"), js.get("fOilTemp"),
+            js.get("fHeliumTemp"), js.get("fHighPressure"), js.get("fLowPressure"),
+            js.get("fMotorCurrent"), bool(js.get("bCompressorRunning")))
+    if all(v is None for v in vals[:7]):
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO pulsetube_readings (coolant_in, coolant_out, oil, helium, "
+                "high_pressure, low_pressure, motor_current, running) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", vals)
+        conn.commit()
+    except Exception as e:
+        log.error(f"pulsetube record failed: {e}")
+        conn.rollback()
+
+
+# Plottable pulse-tube quantities: regex → (db column, label, unit kind).
+_PT_PLOT = [
+    (r"coolant\s*[- ]?in",   "coolant_in",    "Coolant In",    "temp"),
+    (r"coolant\s*[- ]?out",  "coolant_out",   "Coolant Out",   "temp"),
+    (r"\boil\b",             "oil",           "Oil",           "temp"),
+    (r"helium|\bhe\b",       "helium",        "Helium",        "temp"),
+    (r"high\s*press",        "high_pressure", "High Pressure", "psi"),
+    (r"low\s*press",         "low_pressure",  "Low Pressure",  "psi"),
+    (r"motor\s*current|current", "motor_current", "Motor Current", "amp"),
+]
+
+
+def _match_pulsetube_quantity(text: str):
+    """Return (column, label, unit_kind) if the text names a pulse-tube quantity."""
+    t = text.lower()
+    for pat, col, label, kind in _PT_PLOT:
+        if re.search(pat, t):
+            return col, label, kind
+    return None
+
+
+def _cmd_plot_pulsetube(column: str, label: str, kind: str, reply_ts: str,
+                        conn=None, minutes: float = 120):
+    if conn is None:
+        send_slack("Cannot plot: no database connection.", thread_ts=reply_ts)
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT time, {column} FROM pulsetube_readings "
+            f"WHERE time >= now() - (%s || ' minutes')::interval "
+            f"AND {column} IS NOT NULL ORDER BY time", (minutes,))
+        rows = cur.fetchall()
+    if not rows:
+        send_slack(f"No recorded pulse-tube data yet for *{label}* — recording just "
+                   "started; try again in a few minutes.", thread_ts=reply_ts)
+        return
+
+    times = [r[0].astimezone(_CDT).replace(tzinfo=None) for r in rows]
+    if kind == "temp":
+        vals, unit = [r[1] - 273.15 for r in rows], "°C"
+    elif kind == "psi":
+        vals, unit = [r[1] / 6894.757 for r in rows], "psi"
+    else:
+        vals, unit = [r[1] for r in rows], "A"
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(times, vals, "-", color="#1f77b4", linewidth=1.3)
+    rng = _fmt_duration_minutes(minutes)
+    ax.set_title(f"Pulse Tube {label} — last {rng} (CDT)  ({len(rows)} points)")
+    ax.set_ylabel(f"{label} ({unit})")
+    ax.grid(True, alpha=0.3)
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    fig.autofmt_xdate()
+    out = Path("/tmp") / f"pt_{column}.png"
+    fig.savefig(out, dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    slack_upload_image(str(out), f"Pulse Tube {label} — last {rng}", thread_ts=reply_ts)
+    log.info(f"Sent pulse-tube plot: {column} ({len(rows)} pts)")
 
 
 # ── Valve status command ──────────────────────────────────────────────────────
@@ -3143,6 +3242,9 @@ def run():
 
         # Maintenance: chilled water filter reminder (independent of pause/ack)
         check_filter_reminder(state)
+
+        # Record pulse-tube analog values for history/plotting
+        record_pulsetube(conn, state)
 
         # 3. Run checks
         all_alerts = []
