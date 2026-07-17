@@ -2046,6 +2046,27 @@ def _cmd_status(state: dict, reply_ts=None):
 
 # ── Alert checks ──────────────────────────────────────────────────────────────
 
+# Recovery notifications: track which condition alarms are currently active so a
+# "✅ cleared" message is sent when the condition returns to normal (per the
+# operator's request — for all condition-based alarms, not just data sync).
+
+def _alarm_mark_active(state: dict, key: str, label: str) -> None:
+    """Record that a condition alarm is currently active (idempotent)."""
+    state.setdefault("active_alarms", {})[key] = label
+
+
+def _alarm_clear(state: dict, key: str, note: str = None):
+    """If the alarm was active, clear it and return a (None, msg) 'cleared'
+    entry to send; otherwise return None."""
+    aa = state.setdefault("active_alarms", {})
+    label = aa.pop(key, None)
+    if label is None:
+        return None
+    log.info(f"Alarm cleared: {key}")
+    body = note or f"*{label}* is back to normal."
+    return (None, f":white_check_mark: *Cleared* — {body}")
+
+
 def check_sensor_thresholds(conn, state: dict) -> list:
     thresholds = active_thresholds(state)
     if not thresholds:
@@ -2076,6 +2097,9 @@ def check_sensor_thresholds(conn, state: dict) -> list:
         is_min = min_v is not None and value < min_v
 
         if not (is_max or is_min):
+            cleared = _alarm_clear(state, f"THRESH::{name}")   # back to normal
+            if cleared:
+                results.append(cleared)
             continue
 
         # Support 4-element tuples: (max_v, min_v, max_desc, min_desc)
@@ -2083,6 +2107,8 @@ def check_sensor_thresholds(conn, state: dict) -> list:
             desc = entry[3] if is_min else entry[2]
         else:
             desc = entry[2]
+
+        _alarm_mark_active(state, f"THRESH::{name}", desc)
 
         ack_until = acked.get(name)
         if ack_until and datetime.fromisoformat(ack_until) > now:
@@ -2315,9 +2341,16 @@ def check_transitioning_devices(conn, state: dict) -> list:
     label_map = dict(required)
     for mapping in mappings:
         row = rows.get(mapping)
-        if row is None or row["value"]:
-            continue                       # no data, or ON → fine
+        label = label_map[mapping]
+        if row is None or row["value"]:        # no data, or ON → fine
+            if row is not None and row["value"]:
+                cleared = _alarm_clear(state, f"TRANS::{mapping}",
+                                       note=f"{label} is back ON.")
+                if cleared:
+                    results.append(cleared)
+            continue
 
+        _alarm_mark_active(state, f"TRANS::{mapping}", f"{label} OFF during TRANSITIONING")
         ack_until = acked.get(mapping)
         if ack_until and datetime.fromisoformat(ack_until) > now:
             continue
@@ -2326,7 +2359,6 @@ def check_transitioning_devices(conn, state: dict) -> list:
             continue
 
         state["last_alert_time"][mapping] = now.isoformat()
-        label = label_map[mapping]
         msg = (f":rotating_light: *CRITICAL — {label} is OFF during TRANSITIONING{dir_label}* :rotating_light:\n"
                f"The {label.lower()} must stay *ON* while the fridge is {dir_verb}.\n"
                f"Turned OFF at: {row['time']}\n"
@@ -2540,8 +2572,10 @@ def check_cold_cathode(conn, state: dict):
     problem = (mode == "IDLE" and cc_on) or (mode == "COLD" and not cc_on)
     if not problem:
         state.setdefault("last_alert_time", {}).pop(key, None)
-        return None
+        cleared = _alarm_clear(state, key, note="cold cathode (P1) state is back to normal.")
+        return cleared[1] if cleared else None
 
+    _alarm_mark_active(state, key, "Cold cathode (P1) wrong state")
     last = state.get("last_alert_time", {}).get(key)
     if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=config.ALERT_COOLDOWN_MINUTES):
         return None
@@ -2617,8 +2651,12 @@ def check_air_pressure(conn, state: dict) -> list:
         else:                               # normal / recovered
             levels.pop(field, None)
             state["last_alert_time"].pop(field, None)
+            cleared = _alarm_clear(state, f"AIR::{field}")
+            if cleared:
+                results.append(cleared)
             continue
 
+        _alarm_mark_active(state, f"AIR::{field}", cfg["label"] + " low")
         ack_until = acked.get(field)
         if ack_until and datetime.fromisoformat(ack_until) > now:
             continue
@@ -2725,6 +2763,9 @@ def check_device_health(conn, state: dict) -> list:
             key = f"DEVICE::{dev}::{sev}"
             if not items:
                 state["last_alert_time"].pop(key, None)
+                if key in prev:                 # had a fault last cycle → recovered
+                    results.append((None,
+                        f":white_check_mark: *Cleared* — {name}: {sev}(s) resolved."))
                 continue
             current[key] = items
             ack_until = acked.get(key)
@@ -2773,8 +2814,12 @@ def check_coolant_dewpoint(conn, state: dict) -> list:
     key = "COOLANT_DEWPOINT"
     if coolant_c >= dp:                          # OK — above dew point
         state["last_alert_time"].pop(key, None)
-        return []
+        cleared = _alarm_clear(state, key,
+                               note=f"coolant-in `{coolant_c:.1f} °C` is back above the "
+                                    f"dew point `{dp:.1f} °C`.")
+        return [cleared] if cleared else []
 
+    _alarm_mark_active(state, key, "Coolant-in below dew point")
     now      = datetime.now()
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
     acked    = state.setdefault("acked_sensors", {})
@@ -2806,7 +2851,13 @@ def check_data_freshness(conn, state: dict):
         latest = latest.replace(tzinfo=timezone.utc)
     age = datetime.now(timezone.utc) - latest
     if age <= timedelta(minutes=5):
+        # Fresh again — if it had been alerting, announce recovery.
+        if state.get("freshness_active"):
+            state["freshness_active"] = False
+            state.pop("last_freshness_alert", None)
+            return ":white_check_mark: *Cleared* — data sync has caught up (readings are current again)."
         return None
+    state["freshness_active"] = True
     last = state.get("last_freshness_alert")
     if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=30):
         return None
@@ -3145,8 +3196,9 @@ def run():
 
     pending = state.setdefault("pending_alert_msgs", {})
     for sensor_name, msg in all_alerts:
-        ts = send_slack(msg)
-        if ts and sensor_name:
+        is_cleared = "*Cleared*" in msg or "caught up" in msg
+        ts = send_slack(msg, color="good" if is_cleared else "danger")
+        if ts and sensor_name and not is_cleared:
             pending[sensor_name] = {"ts": ts, "channel": config.SLACK_CHANNEL}
 
     save_state(state)
