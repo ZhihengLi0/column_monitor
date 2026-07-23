@@ -2986,8 +2986,10 @@ def check_sensor_staleness(conn, state: dict) -> list:
     if not sensors:
         return []
     default_min = getattr(config, "STALENESS_MINUTES", 10)
-    # Normalise entries to (mapping, label, minutes).
-    specs = [(s[0], s[1], s[2] if len(s) > 2 else default_min) for s in sensors]
+    # Normalise entries to (mapping, label, minutes, confidence).
+    specs = [(s[0], s[1],
+              s[2] if len(s) > 2 else default_min,
+              s[3] if len(s) > 3 else "certain") for s in sensors]
     mappings = [s[0] for s in specs]
 
     ph = ",".join(["%s"] * len(mappings))
@@ -3002,7 +3004,7 @@ def check_sensor_staleness(conn, state: dict) -> list:
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
     acked    = state.setdefault("acked_sensors", {})
 
-    for mp, label, max_min in specs:
+    for mp, label, max_min, confidence in specs:
         key   = f"STALE::{mp}"
         ts    = latest.get(mp)
         if ts is not None and ts.tzinfo is None:
@@ -3023,15 +3025,27 @@ def check_sensor_staleness(conn, state: dict) -> list:
             continue
         state["last_alert_time"][key] = datetime.now().isoformat()
 
-        if ts is None:
-            detail = "no readings at all in the database"
+        mins = int(age.total_seconds() / 60) if age is not None else None
+        silence_hint = "_React ✅ or reply `ok` / `silent for 2h` in thread to silence_"
+        if confidence == "maybe":
+            # Value naturally gaps when stable — softer, explain-the-situation wording.
+            if ts is None:
+                detail = "has no readings at all in the database"
+            else:
+                detail = f"hasn't changed for {mins} min"
+            msg = (f":grey_question: *{label} — no update for a while*\n"
+                   f"`{mp}` {detail}. This *may* just mean the value is steady, "
+                   f"or the sensor could be offline — worth a look.\n"
+                   f"{silence_hint}")
         else:
-            detail = f"last reading {int(age.total_seconds()/60)} min ago"
-        msg = (f":sos: *Sensor not updating — {label}* :sos:\n"
-               f"`{mp}` {detail} (expected within {max_min} min).\n"
-               "_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+            # Steady sensor — a gap almost certainly means it stopped.
+            detail = ("no readings at all in the database" if ts is None
+                      else f"last reading {mins} min ago")
+            msg = (f":sos: *Sensor not updating — {label}* :sos:\n"
+                   f"`{mp}` {detail} (expected within {max_min} min).\n"
+                   f"{silence_hint}")
         results.append((key, msg))
-        log.warning(f"Sensor stale: {mp} ({detail})")
+        log.warning(f"Sensor stale [{confidence}]: {mp} ({label})")
     return results
 
 

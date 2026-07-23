@@ -125,28 +125,30 @@ COOLDOWN_MILESTONE_HYSTERESIS_K = 1.0
 # freshness check misses that). Excludes change-only channels (target temperature,
 # heating power) which legitimately go long periods without a new record.
 STALENESS_MINUTES = 5   # default max age for a sensor's latest reading
-# (mapping, label, max_age_minutes). Per-sensor limits set from each sensor's real
-# 7-day gap distribution (these are value-change events, so stable values gap):
-#   main thermometers (p999 ≤ 5 min) → 5 min  (the professor's thermometry concern)
-#   P1/P4 (p999 ≈ 17–23 min)         → 20 min
-#   other pressures (p999 ≤ 11 min)  → 10 min
-#   B1A/B2 (values so stable they gap for hours; p999 ≈ 5 h) → 360 min
+# (mapping, label, max_age_minutes, confidence). Per-sensor limits set from each
+# sensor's real 7-day gap distribution (these are value-change events, so stable
+# values gap). confidence:
+#   "certain" — updates steadily; no new reading almost surely means it's stopped
+#               → a definite "sensor not updating" alarm (the main thermometers).
+#   "maybe"   — value naturally gaps when stable, so a long gap MIGHT just mean the
+#               reading hasn't changed, or it MIGHT be offline → a softer, explain-
+#               the-situation alarm (pressures, B1A/B2).
 STALENESS_SENSORS = [
-    ("MXC_TEMPERATURE",     "MXC1",   5),
-    ("MXC_TEMPERATURE_FAR", "MXC2",   5),
-    ("STILL_TEMPERATURE",   "Still",  5),
-    ("4K_TEMPERATURE",      "4K",     5),
-    ("50K_TEMPERATURE",     "50K",   10),
-    ("B1A_TEMPERATURE",     "B1A",  360),
-    ("B2_TEMPERATURE",      "B2",   360),
-    ("P1_PRESSURE",         "P1",    30),
-    ("P2_PRESSURE",         "P2",    30),
-    ("P3_PRESSURE",         "P3",    30),
-    ("P4_PRESSURE",         "P4",    45),
-    ("P5_PRESSURE",         "P5",    30),
-    ("P6_PRESSURE",         "P6",    30),
-    ("P7_PRESSURE",         "P7",    30),
-    ("FLOW_VALUE",          "Flow",  30),
+    ("MXC_TEMPERATURE",     "MXC1",   5, "certain"),
+    ("MXC_TEMPERATURE_FAR", "MXC2",   5, "certain"),
+    ("STILL_TEMPERATURE",   "Still",  5, "certain"),
+    ("4K_TEMPERATURE",      "4K",     5, "certain"),
+    ("50K_TEMPERATURE",     "50K",   10, "certain"),
+    ("B1A_TEMPERATURE",     "B1A",  360, "maybe"),
+    ("B2_TEMPERATURE",      "B2",   360, "maybe"),
+    ("P1_PRESSURE",         "P1",    30, "maybe"),
+    ("P2_PRESSURE",         "P2",    30, "maybe"),
+    ("P3_PRESSURE",         "P3",    30, "maybe"),
+    ("P4_PRESSURE",         "P4",    45, "maybe"),
+    ("P5_PRESSURE",         "P5",    30, "maybe"),
+    ("P6_PRESSURE",         "P6",    30, "maybe"),
+    ("P7_PRESSURE",         "P7",    30, "maybe"),
+    ("FLOW_VALUE",          "Flow",  30, "maybe"),
 ]
 
 # Sync batch size (rows per table per sync cycle, Windows side)
