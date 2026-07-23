@@ -2999,6 +2999,25 @@ def check_sensor_staleness(conn, state: dict) -> list:
             f"WHERE mapping IN ({ph}) GROUP BY mapping", mappings)
         latest = dict(cur.fetchall())
 
+    # A pressure gauge that is out of range (under/over) legitimately reads a
+    # constant out-of-range value and stops updating — that is not a fault. Skip
+    # staleness for any pressure currently flagged under/over-range (e.g. P3 goes
+    # underrange once cold: gauge RUNNING, pressure below its measurable floor).
+    out_of_range = set()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            cur.execute("SELECT DISTINCT ON (device_id) device_id, values FROM public.device_states "
+                        "WHERE device_id LIKE 'plc.IO.P%' ORDER BY device_id, datetime DESC")
+            for row in cur.fetchall():
+                js = row["values"]
+                if isinstance(js, str):
+                    js = json.loads(js)
+                if js.get("bWarningUnderrange") or js.get("bWarningOverrange"):
+                    n = row["device_id"].split(".")[-1]          # plc.IO.P3 → P3
+                    out_of_range.add(f"{n}_PRESSURE")
+    except Exception as e:
+        log.debug(f"staleness: range-flag read failed: {e}")
+
     results  = []
     now      = datetime.now(timezone.utc)
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
@@ -3006,6 +3025,10 @@ def check_sensor_staleness(conn, state: dict) -> list:
 
     for mp, label, max_min, confidence in specs:
         key   = f"STALE::{mp}"
+        if mp in out_of_range:              # out of range → not a fault, clear & skip
+            state["last_alert_time"].pop(key, None)
+            _alarm_clear(state, key, note=f"*{label}* is out of range (gauge OK).")
+            continue
         ts    = latest.get(mp)
         if ts is not None and ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)

@@ -142,7 +142,7 @@ STALENESS_SENSORS = [
     ("4K_TEMPERATURE",      "4K",     5, "certain"),
     ("50K_TEMPERATURE",     "50K",   10, "certain"),
     ("P2_PRESSURE",         "P2",    10, "certain"),   # ~6 s, very steady
-    ("P3_PRESSURE",         "P3",    10, "certain"),   # was ~8 s; stopped 2026-07-18
+    ("P3_PRESSURE",         "P3",    10, "certain"),
     ("P5_PRESSURE",         "P5",    10, "certain"),
     ("P6_PRESSURE",         "P6",    10, "certain"),
     # Periodic but with frequent longer gaps (fast when changing, gaps when
