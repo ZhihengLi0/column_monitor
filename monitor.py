@@ -2085,6 +2085,10 @@ def _alarm_clear(state: dict, key: str, note: str = None) -> None:
         return
     if state.get("alerts_paused"):
         return
+    # If this alarm is currently silenced, stay quiet on recovery too.
+    ack_until = state.get("acked_sensors", {}).get(key)
+    if ack_until and datetime.fromisoformat(ack_until) > datetime.now():
+        return
     label = info["label"] if isinstance(info, dict) else info
     ts    = info.get("ts") if isinstance(info, dict) else None
     body  = note or f"*{label}* is back to normal."
