@@ -118,5 +118,36 @@ COOLDOWN_MILESTONES = [
 ]
 COOLDOWN_MILESTONE_HYSTERESIS_K = 1.0
 
+# ── Per-sensor data staleness (checked in ALL modes) ───────────────────────────
+# Continuously-sampled sensors that should update regularly. If any ONE of these
+# has a latest reading older than STALENESS_MINUTES, alarm — this catches a single
+# thermometer/gauge freezing even while the others keep updating (the global
+# freshness check misses that). Excludes change-only channels (target temperature,
+# heating power) which legitimately go long periods without a new record.
+STALENESS_MINUTES = 10   # default max age for a sensor's latest reading
+# (mapping, label, max_age_minutes). These are value-change events, so a sensor
+# whose value is very stable records less often. The main plate thermometers and
+# most pressures update every ~1 min (95th-percentile gap ≤ 4 min) → 10 min is a
+# safe limit. B1A/B2 are turbo-pump stage temps that legitimately go much longer
+# between records when stable (B1A 95th-percentile gap ≈ 28 min), so they get a
+# generous limit to avoid false alarms — they still catch a truly extended freeze.
+STALENESS_SENSORS = [
+    ("MXC_TEMPERATURE",     "MXC1",  10),
+    ("MXC_TEMPERATURE_FAR", "MXC2",  10),
+    ("STILL_TEMPERATURE",   "Still", 10),
+    ("4K_TEMPERATURE",      "4K",    10),
+    ("50K_TEMPERATURE",     "50K",   10),
+    ("B1A_TEMPERATURE",     "B1A",   90),
+    ("B2_TEMPERATURE",      "B2",    45),
+    ("P1_PRESSURE",         "P1",    10),
+    ("P2_PRESSURE",         "P2",    10),
+    ("P3_PRESSURE",         "P3",    10),
+    ("P4_PRESSURE",         "P4",    10),
+    ("P5_PRESSURE",         "P5",    10),
+    ("P6_PRESSURE",         "P6",    15),
+    ("P7_PRESSURE",         "P7",    10),
+    ("FLOW_VALUE",          "Flow",  10),
+]
+
 # Sync batch size (rows per table per sync cycle, Windows side)
 SYNC_BATCH_SIZE = 5000

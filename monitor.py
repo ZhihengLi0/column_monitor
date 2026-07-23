@@ -1961,7 +1961,10 @@ def _cmd_list_alarms(state: dict, reply_ts=None, only_mode=None):
     lines.append(f"  • *Valves* — {valve_labels} open or close")
     lines.append(f"  • *CS2 system alert* — new entry with severity ≥ "
                  f"{config.CS2_ALERT_MIN_SEVERITY} (error)")
-    lines.append("  • *Data sync stalled* — no new sensor reading for > 5 min")
+    lines.append("  • *Data sync stalled* — no new sensor reading (any sensor) for > 5 min")
+    lines.append(f"  • *Sensor not updating* — any single thermometer/gauge "
+                 f"(temps, P1–P7, flow) with no new reading for > "
+                 f"{getattr(config,'STALENESS_MINUTES',10)} min")
     for cfg in getattr(config, "AIR_PRESSURE_ALARMS", {}).values():
         u = cfg["unit"]; s = cfg.get("scale", 1)
         parts = []
@@ -2970,6 +2973,64 @@ def check_data_freshness(conn, state: dict):
             f"Latest reading is {int(age.total_seconds()/60)} min old.")
 
 
+def check_sensor_staleness(conn, state: dict) -> list:
+    """Per-sensor staleness (ALL modes): if any continuously-sampled sensor's
+    latest reading is older than STALENESS_MINUTES, alarm. Catches a single
+    thermometer/gauge freezing even while the rest keep updating (which the
+    global freshness check misses). Recovery '✅ Cleared' when it updates again."""
+    sensors = getattr(config, "STALENESS_SENSORS", [])
+    if not sensors:
+        return []
+    default_min = getattr(config, "STALENESS_MINUTES", 10)
+    # Normalise entries to (mapping, label, minutes).
+    specs = [(s[0], s[1], s[2] if len(s) > 2 else default_min) for s in sensors]
+    mappings = [s[0] for s in specs]
+
+    ph = ",".join(["%s"] * len(mappings))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT mapping, MAX(time) FROM public.double_value_change_events "
+            f"WHERE mapping IN ({ph}) GROUP BY mapping", mappings)
+        latest = dict(cur.fetchall())
+
+    results  = []
+    now      = datetime.now(timezone.utc)
+    cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+    acked    = state.setdefault("acked_sensors", {})
+
+    for mp, label, max_min in specs:
+        key   = f"STALE::{mp}"
+        ts    = latest.get(mp)
+        if ts is not None and ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = (now - ts) if ts is not None else None
+
+        if age is not None and age <= timedelta(minutes=max_min):   # fresh
+            state["last_alert_time"].pop(key, None)
+            _alarm_clear(state, key, note=f"*{label}* is updating again.")
+            continue
+
+        _alarm_mark_active(state, key, f"{label} readings stale")
+        ack_until = acked.get(key)
+        if ack_until and datetime.fromisoformat(ack_until) > datetime.now():
+            continue
+        last = state["last_alert_time"].get(key)
+        if last and datetime.now() - datetime.fromisoformat(last) < cooldown:
+            continue
+        state["last_alert_time"][key] = datetime.now().isoformat()
+
+        if ts is None:
+            detail = "no readings at all in the database"
+        else:
+            detail = f"last reading {int(age.total_seconds()/60)} min ago"
+        msg = (f":sos: *Sensor not updating — {label}* :sos:\n"
+               f"`{mp}` {detail} (expected within {max_min} min).\n"
+               "_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+        results.append((key, msg))
+        log.warning(f"Sensor stale: {mp} ({detail})")
+    return results
+
+
 def check_cooldown_milestone(conn, state: dict) -> list:
     """Informational one-time notifications when a plate cools past a threshold
     (downward crossing only, i.e. during cool-down). Re-arms after warming back
@@ -3258,6 +3319,9 @@ def run():
         if freshness:
             # keyed "FRESHNESS" so run() captures its ts for the thread reply on clear
             all_alerts.append(("FRESHNESS", freshness))
+
+        # Per-sensor staleness (one thermometer/gauge freezing, all modes)
+        all_alerts.extend(check_sensor_staleness(conn, state))
 
         all_alerts.extend(check_sensor_thresholds(conn, state))
 
