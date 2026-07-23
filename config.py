@@ -125,30 +125,34 @@ COOLDOWN_MILESTONE_HYSTERESIS_K = 1.0
 # freshness check misses that). Excludes change-only channels (target temperature,
 # heating power) which legitimately go long periods without a new record.
 STALENESS_MINUTES = 5   # default max age for a sensor's latest reading
-# (mapping, label, max_age_minutes, confidence). Per-sensor limits set from each
-# sensor's real 7-day gap distribution (these are value-change events, so stable
-# values gap). confidence:
-#   "certain" — updates steadily; no new reading almost surely means it's stopped
-#               → a definite "sensor not updating" alarm (the main thermometers).
-#   "maybe"   — value naturally gaps when stable, so a long gap MIGHT just mean the
-#               reading hasn't changed, or it MIGHT be offline → a softer, explain-
-#               the-situation alarm (pressures, B1A/B2).
+# (mapping, label, max_age_minutes, confidence). Per operator guidance, ONLY
+# periodically-sampled variables are stale-checked — these update at a fixed
+# interval regardless of value. Change-based variables (updated only when the
+# value changes, e.g. He flow which sits at 0 when not circulating) are excluded,
+# because "no new record" is normal for them. Classification confirmed from the
+# data: periodic sensors keep producing records every few seconds/minutes even
+# when stable; change-based ones produce almost none.
+# confidence: "certain" (steady periodic → a gap means it stopped) vs "maybe"
+# (periodic but with irregular longer gaps → softer, explain-the-situation wording).
 STALENESS_SENSORS = [
-    ("MXC_TEMPERATURE",     "MXC1",   5, "certain"),
+    # Reliably periodic (consistent interval) → tight limit, definite wording.
+    ("MXC_TEMPERATURE",     "MXC1",   5, "certain"),   # ~57 s
     ("MXC_TEMPERATURE_FAR", "MXC2",   5, "certain"),
     ("STILL_TEMPERATURE",   "Still",  5, "certain"),
     ("4K_TEMPERATURE",      "4K",     5, "certain"),
     ("50K_TEMPERATURE",     "50K",   10, "certain"),
-    ("B1A_TEMPERATURE",     "B1A",  360, "maybe"),
-    ("B2_TEMPERATURE",      "B2",   360, "maybe"),
+    ("P2_PRESSURE",         "P2",    10, "certain"),   # ~6 s, very steady
+    ("P3_PRESSURE",         "P3",    10, "certain"),   # was ~8 s; stopped 2026-07-18
+    ("P5_PRESSURE",         "P5",    10, "certain"),
+    ("P6_PRESSURE",         "P6",    10, "certain"),
+    # Periodic but with frequent longer gaps (fast when changing, gaps when
+    # steady) → generous limit, softer wording to avoid false alarms.
+    ("P7_PRESSURE",         "P7",    20, "maybe"),
     ("P1_PRESSURE",         "P1",    30, "maybe"),
-    ("P2_PRESSURE",         "P2",    30, "maybe"),
-    ("P3_PRESSURE",         "P3",    30, "maybe"),
     ("P4_PRESSURE",         "P4",    45, "maybe"),
-    ("P5_PRESSURE",         "P5",    30, "maybe"),
-    ("P6_PRESSURE",         "P6",    30, "maybe"),
-    ("P7_PRESSURE",         "P7",    30, "maybe"),
-    ("FLOW_VALUE",          "Flow",  30, "maybe"),
+    ("B1A_TEMPERATURE",     "B1A",  120, "maybe"),
+    ("B2_TEMPERATURE",      "B2",   120, "maybe"),
+    # FLOW_VALUE excluded — change-based (constant 0 when not circulating).
 ]
 
 # Sync batch size (rows per table per sync cycle, Windows side)
