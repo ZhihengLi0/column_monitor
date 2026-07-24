@@ -3018,6 +3018,22 @@ def check_sensor_staleness(conn, state: dict) -> list:
     except Exception as e:
         log.debug(f"staleness: range-flag read failed: {e}")
 
+    # Turbo-pump stage temps (B1A/B2) only report while the pump is ON; a stopped
+    # reading when the pump is off is expected, not a fault. Skip those whose pump
+    # is currently off (latest B1A_ENABLED / B2_ENABLED = false).
+    pump_off = set()
+    try:
+        with conn.cursor() as cur:
+            for pump, mp in (("B1A_ENABLED", "B1A_TEMPERATURE"),
+                             ("B2_ENABLED",  "B2_TEMPERATURE")):
+                cur.execute("SELECT value FROM public.boolean_value_change_events "
+                            "WHERE mapping = %s ORDER BY time DESC LIMIT 1", (pump,))
+                r = cur.fetchone()
+                if r is not None and not r[0]:
+                    pump_off.add(mp)
+    except Exception as e:
+        log.debug(f"staleness: pump-state read failed: {e}")
+
     results  = []
     now      = datetime.now(timezone.utc)
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
@@ -3028,6 +3044,10 @@ def check_sensor_staleness(conn, state: dict) -> list:
         if mp in out_of_range:              # out of range → not a fault, clear & skip
             state["last_alert_time"].pop(key, None)
             _alarm_clear(state, key, note=f"*{label}* is out of range (gauge OK).")
+            continue
+        if mp in pump_off:                  # turbo pump off → not monitored, clear & skip
+            state["last_alert_time"].pop(key, None)
+            _alarm_clear(state, key, note=f"*{label}* pump is off (not monitored).")
             continue
         ts    = latest.get(mp)
         if ts is not None and ts.tzinfo is None:

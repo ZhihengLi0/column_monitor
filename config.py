@@ -150,6 +150,8 @@ STALENESS_SENSORS = [
     ("P7_PRESSURE",         "P7",    20, "maybe"),
     ("P1_PRESSURE",         "P1",    30, "maybe"),
     ("P4_PRESSURE",         "P4",    45, "maybe"),
+    # Turbo-pump stage temps: only stale-checked while the pump is ON
+    # (B1A_ENABLED/B2_ENABLED) — a stopped reading when the pump is off is normal.
     ("B1A_TEMPERATURE",     "B1A",  120, "maybe"),
     ("B2_TEMPERATURE",      "B2",   120, "maybe"),
     # FLOW_VALUE excluded — change-based (constant 0 when not circulating).
