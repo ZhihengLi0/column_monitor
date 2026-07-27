@@ -2999,6 +2999,16 @@ def check_sensor_staleness(conn, state: dict) -> list:
             f"WHERE mapping IN ({ph}) GROUP BY mapping", mappings)
         latest = dict(cur.fetchall())
 
+    # Global outage guard: if even the FRESHEST monitored sensor is stale, the
+    # whole sync/pipeline is down (not one sensor freezing). The single global
+    # data-freshness alarm covers that — skip per-sensor alarms so a whole-sync
+    # outage doesn't fire ~13 "sensor not updating" messages at once (Slack flood).
+    _now = datetime.now(timezone.utc)
+    _ages = [ (_now - (t.replace(tzinfo=timezone.utc) if t.tzinfo is None else t))
+              for t in latest.values() if t is not None ]
+    if _ages and min(_ages) > timedelta(minutes=5):
+        return []
+
     # A pressure gauge that is out of range (under/over) legitimately reads a
     # constant out-of-range value and stops updating — that is not a fault. Skip
     # staleness for any pressure currently flagged under/over-range (e.g. P3 goes
