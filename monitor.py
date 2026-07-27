@@ -2954,27 +2954,46 @@ def check_coolant_dewpoint(conn, state: dict) -> list:
 
 
 def check_data_freshness(conn, state: dict):
+    """Whole-pipeline outage: the sync computer being off / network down stops
+    ALL fridge readings. Fires ONE alert (the per-sensor flood is suppressed by
+    the global-outage guard), can be silenced by replying in its thread, and
+    auto-recovers + resets that silence the moment data returns."""
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(time) FROM public.double_value_change_events")
         latest = cur.fetchone()[0]
+    # No data at all → treat as a very stale outage (still alertable/silenceable).
     if latest is None:
-        return ":sos: No sensor data in local database!"
-    if latest.tzinfo is None:
-        latest = latest.replace(tzinfo=timezone.utc)
-    age = datetime.now(timezone.utc) - latest
+        age = timedelta(days=3650)
+    else:
+        if latest.tzinfo is None:
+            latest = latest.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - latest
     if age <= timedelta(minutes=5):
-        # Fresh again — announce recovery in channel + the alarm's thread.
+        # Fresh again (e.g. the computer was turned back on) — announce recovery
+        # in channel + the alarm's thread, and drop any reply-silence so the
+        # NEXT outage alerts normally again.
         state.pop("last_freshness_alert", None)
+        state.setdefault("acked_sensors", {}).pop("FRESHNESS", None)
+        state.setdefault("pending_alert_msgs", {}).pop("FRESHNESS", None)
         _alarm_clear(state, "FRESHNESS",
                      note="data sync has caught up (readings are current again).")
         return None
     _alarm_mark_active(state, "FRESHNESS", "Data sync stopped")
+    # Respect a reply-silence ("silence 3 days" / "silent forever" in the thread):
+    # stay quiet while silenced, but keep the alarm active so recovery still fires.
+    ack_until = state.get("acked_sensors", {}).get("FRESHNESS")
+    if ack_until and datetime.fromisoformat(ack_until) > datetime.now():
+        return None
     last = state.get("last_freshness_alert")
     if last and datetime.now() - datetime.fromisoformat(last) < timedelta(minutes=30):
         return None
     state["last_freshness_alert"] = datetime.now().isoformat()
+    age_txt = ">3650 days (database empty)" if latest is None \
+        else f"{int(age.total_seconds()/60)} min old"
     return (f":sos: *Data sync may have stopped!* "
-            f"Latest reading is {int(age.total_seconds()/60)} min old.")
+            f"Latest reading is {age_txt}. The sync computer may be off/offline.\n"
+            f"_Reply `silence 3 days` / `silent forever` in thread to mute — "
+            f"it auto-resumes when data returns._")
 
 
 def check_sensor_staleness(conn, state: dict) -> list:
