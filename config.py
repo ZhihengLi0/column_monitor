@@ -141,15 +141,16 @@ STALENESS_SENSORS = [
     ("STILL_TEMPERATURE",   "Still",  5, "certain"),
     ("4K_TEMPERATURE",      "4K",     5, "certain"),
     ("50K_TEMPERATURE",     "50K",   10, "certain"),
-    ("P2_PRESSURE",         "P2",    10, "certain"),   # ~6 s, very steady
-    ("P3_PRESSURE",         "P3",    10, "certain"),
-    ("P5_PRESSURE",         "P5",    10, "certain"),
-    ("P6_PRESSURE",         "P6",    10, "certain"),
-    # Periodic but with frequent longer gaps (fast when changing, gaps when
-    # steady) → generous limit, softer wording to avoid false alarms.
-    ("P7_PRESSURE",         "P7",    20, "maybe"),
-    ("P1_PRESSURE",         "P1",    30, "maybe"),
-    ("P4_PRESSURE",         "P4",    45, "maybe"),
+    # All pressures P1–P7: 60 min ("no data for 1 h" → alert). Pressures can sit
+    # unchanged for long stretches when steady / out of range, so a generous 1 h
+    # limit avoids false "not updating" alarms.
+    ("P1_PRESSURE",         "P1",    60, "maybe"),
+    ("P2_PRESSURE",         "P2",    60, "maybe"),
+    ("P3_PRESSURE",         "P3",    60, "maybe"),
+    ("P4_PRESSURE",         "P4",    60, "maybe"),
+    ("P5_PRESSURE",         "P5",    60, "maybe"),
+    ("P6_PRESSURE",         "P6",    60, "maybe"),
+    ("P7_PRESSURE",         "P7",    60, "maybe"),
     # Turbo-pump stage temps: only stale-checked while the pump is ON
     # (B1A_ENABLED/B2_ENABLED) — a stopped reading when the pump is off is normal.
     ("B1A_TEMPERATURE",     "B1A",  120, "maybe"),
