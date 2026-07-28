@@ -151,11 +151,12 @@ STALENESS_SENSORS = [
     ("P5_PRESSURE",         "P5",    60, "maybe"),
     ("P6_PRESSURE",         "P6",    60, "maybe"),
     ("P7_PRESSURE",         "P7",    60, "maybe"),
-    # Turbo-pump stage temps: only stale-checked while the pump is ON
-    # (B1A_ENABLED/B2_ENABLED) — a stopped reading when the pump is off is normal.
-    ("B1A_TEMPERATURE",     "B1A",   60, "maybe"),
+    # Turbo-pump stage temp B2: only stale-checked while the pump is ON
+    # (B2_ENABLED) — a stopped reading when the pump is off is normal.
     ("B2_TEMPERATURE",      "B2",    60, "maybe"),
-    # FLOW_VALUE excluded — change-based (constant 0 when not circulating).
+    # B1A_TEMPERATURE excluded — no staleness alarm (still recorded to the DB,
+    # just not checked for "not updating"). FLOW_VALUE excluded too (change-based,
+    # constant 0 when not circulating).
 ]
 
 # Sync batch size (rows per table per sync cycle, Windows side)
