@@ -17,3 +17,4 @@
 {"text": "silence P2 pressure alarm for 1h", "intent": "ack", "source": "corrected", "from_intent": "pressure_reading"}
 {"text": "temp check", "intent": "temperature_reading", "source": "confirmed"}
 {"text": "temps", "intent": "temperature_reading", "source": "confirmed"}
+{"text": "aa 4k 12h", "intent": "plot", "source": "corrected"}
