@@ -3133,7 +3133,14 @@ def check_sensor_staleness(conn, state: dict) -> list:
     cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
     acked    = state.setdefault("acked_sensors", {})
 
-    for mp, label, max_min, confidence in specs:
+    # Warm stage (IDLE): values are steady, so use a flat wide limit (24 h) for
+    # every sensor to avoid frequent "not updating" false alarms.
+    # TRANSITIONING/COLD keep their tight per-sensor limits.
+    warm_min = getattr(config, "STALENESS_WARM_MINUTES", None) \
+        if state.get("current_mode", "IDLE") == "IDLE" else None
+
+    for mp, label, base_min, confidence in specs:
+        max_min = warm_min if warm_min is not None else base_min
         key   = f"STALE::{mp}"
         if mp in out_of_range:              # out of range → not a fault, clear & skip
             state["last_alert_time"].pop(key, None)

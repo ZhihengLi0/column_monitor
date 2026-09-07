@@ -141,17 +141,25 @@ STALENESS_MINUTES = 5   # default max age for a sensor's latest reading
 # when stable; change-based ones produce almost none.
 # confidence: "certain" (steady periodic → a gap means it stopped) vs "maybe"
 # (periodic but with irregular longer gaps → softer, explain-the-situation wording).
+# Warm stage (IDLE mode): sensor values barely change, so change-events are
+# sparse and per-sensor staleness alarms fire far too often. While in IDLE,
+# every sensor's staleness limit becomes this flat value (24 h) — a sensor only
+# alarms if it produces no data for a full day. TRANSITIONING / COLD keep their
+# own tight per-sensor limits below.
+STALENESS_WARM_MINUTES = 1440   # 24 h
+
 STALENESS_SENSORS = [
     # Reliably periodic (consistent interval) → tight limit, definite wording.
-    ("MXC_TEMPERATURE",     "MXC1",   5, "certain"),   # ~57 s
+    # MXC1 (MXC_TEMPERATURE) excluded — not staleness-checked (data still
+    # recorded), per request: its reading sits frozen and was false-alarming.
     ("MXC_TEMPERATURE_FAR", "MXC2",   5, "certain"),
     ("STILL_TEMPERATURE",   "Still",  5, "certain"),
     ("4K_TEMPERATURE",      "4K",     5, "certain"),
     ("50K_TEMPERATURE",     "50K",   10, "certain"),
-    # All pressures P1–P7: 60 min ("no data for 1 h" → alert). Pressures can sit
+    # Pressures P2–P7: 60 min ("no data for 1 h" → alert). Pressures can sit
     # unchanged for long stretches when steady / out of range, so a generous 1 h
-    # limit avoids false "not updating" alarms.
-    ("P1_PRESSURE",         "P1",    60, "maybe"),
+    # limit avoids false "not updating" alarms. P1 excluded — not staleness-checked
+    # (sits at atmosphere when vented and was false-alarming); data still recorded.
     ("P2_PRESSURE",         "P2",    60, "maybe"),
     ("P3_PRESSURE",         "P3",    60, "maybe"),
     ("P4_PRESSURE",         "P4",    60, "maybe"),
