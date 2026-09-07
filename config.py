@@ -100,6 +100,13 @@ AIR_PRESSURE_ALARMS = {
     },
 }
 
+# ── Pulse-tube compressor temperature limits (checked ONLY while running) ──────
+# Read from device_states JSON (plc.Pulsetube1); the PLC stores temps in Kelvin.
+# Only checked when the compressor is running — when it is off these readings
+# drift to room temperature and would false-alarm. Set to None to disable.
+PT_COOLANT_IN_HIGH_C = 17.0   # coolant-in (cooling water) too warm above this °C
+PT_OIL_HIGH_C        = 40.0   # compressor oil too hot above this °C
+
 # ── Device health alarms (ALL devices in device_states, every mode) ────────────
 # Every device reports its own health in the JSON: statusInfo.errors/errorBit
 # (→ CRITICAL) and statusInfo.warnings/warningBit (→ WARNING), plus per-device

@@ -1441,6 +1441,7 @@ PLOT_SENSORS = {
     "P6": ("P6_PRESSURE", "P6 Pressure", "bar"),
     "P7": ("P7_PRESSURE", "P7 Pressure", "bar"),
     "MXC":     ("MXC_TEMPERATURE",     "MXC Temperature",      "K"),
+    "MXC2":    ("MXC_TEMPERATURE_FAR", "MXC2 (far) Temperature","K"),
     "STILL":   ("STILL_TEMPERATURE",   "Still Temperature",    "K"),
     "4K":      ("4K_TEMPERATURE",      "4K Plate Temperature", "K"),
     "50K":     ("50K_TEMPERATURE",     "50K Plate Temperature","K"),
@@ -1453,6 +1454,11 @@ PLOT_SENSORS = {
 PLOT_SENSOR_ALIASES = {
     "MC":      "MXC",   # mixing chamber
     "MIXING":  "MXC",
+    "MXC1":    "MXC",   # explicit "1" → the near/primary MXC thermometer
+    "MC1":     "MXC",
+    "MXCFAR":  "MXC2",  # far-end MXC thermometer
+    "MCFAR":   "MXC2",
+    "MC2":     "MXC2",
 }
 
 PRESSURE_MAPPINGS_SET = {"P1_PRESSURE","P2_PRESSURE","P3_PRESSURE",
@@ -2953,6 +2959,65 @@ def check_coolant_dewpoint(conn, state: dict) -> list:
     return [(key, msg)]
 
 
+def check_pulsetube_temps(conn, state: dict) -> list:
+    """Pulse-tube compressor temperature limits (ALL modes): coolant-in above
+    PT_COOLANT_IN_HIGH_C or oil above PT_OIL_HIGH_C → alert. Only checked while
+    the compressor is RUNNING — when off, these drift to room temperature and
+    would false-alarm. Each limit alarms/clears/silences independently."""
+    js = _latest_device_state(conn, "plc.Pulsetube1")
+    if not js:
+        return []
+    running = bool(js.get("bCompressorRunning"))
+
+    now      = datetime.now()
+    cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+    acked    = state.setdefault("acked_sensors", {})
+    results  = []
+
+    # (field, threshold_C, alarm_key, human label)
+    checks = [
+        ("fCoolantInTemp", getattr(config, "PT_COOLANT_IN_HIGH_C", None),
+         "PT_COOLANT_IN_HIGH", "Pulse-tube coolant-in temperature high"),
+        ("fOilTemp", getattr(config, "PT_OIL_HIGH_C", None),
+         "PT_OIL_HIGH", "Pulse-tube oil temperature high"),
+    ]
+
+    for field, limit, key, label in checks:
+        if limit is None:
+            continue
+        raw = js.get(field)
+        # Compressor off or reading missing → not a fault; clear any active alarm.
+        if not running or raw is None:
+            state["last_alert_time"].pop(key, None)
+            _alarm_clear(state, key,
+                         note=f"*{label.rsplit(' ',1)[0]}* — compressor off, not checked."
+                         if not running else None)
+            continue
+        temp_c = raw - 273.15                     # K → °C
+        if temp_c <= limit:                        # OK
+            state["last_alert_time"].pop(key, None)
+            _alarm_clear(state, key,
+                         note=f"{label.lower()} back to normal (`{temp_c:.1f} °C` ≤ "
+                              f"`{limit:g} °C`).")
+            continue
+
+        _alarm_mark_active(state, key, label)
+        ack_until = acked.get(key)
+        if ack_until and datetime.fromisoformat(ack_until) > now:
+            continue
+        last = state["last_alert_time"].get(key)
+        if last and now - datetime.fromisoformat(last) < cooldown:
+            continue
+        state["last_alert_time"][key] = now.isoformat()
+        msg = (f":rotating_light: *{label}* :rotating_light:\n"
+               f"Currently `{temp_c:.1f} °C` — above the `{limit:g} °C` limit.\n"
+               "_React ✅ or reply `ok` / `silent for 2h` in thread to silence_")
+        log.warning(f"{key}: {temp_c:.1f}C > {limit}C")
+        results.append((key, msg))
+
+    return results
+
+
 def check_data_freshness(conn, state: dict):
     """Whole-pipeline outage: the sync computer being off / network down stops
     ALL fridge readings. Fires ONE alert (the per-sensor flood is suppressed by
@@ -3429,6 +3494,9 @@ def run():
 
         # Coolant-in must stay above the dew point (condensation risk, all modes)
         all_alerts.extend(check_coolant_dewpoint(conn, state))
+
+        # Pulse-tube coolant-in / oil temperature limits (while running, all modes)
+        all_alerts.extend(check_pulsetube_temps(conn, state))
 
         for msg in check_cs2_alerts(conn, state):
             all_alerts.append((None, msg))
