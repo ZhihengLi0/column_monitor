@@ -76,10 +76,12 @@ CS2_ALERT_MIN_SEVERITY = 2
 
 # ── Chilled water filter replacement reminder ──────────────────────────────────
 # Remind to replace the chilled water filter every N days (3 weeks = 21 days).
-# Once due, nag every FILTER_REMINDER_INTERVAL_MIN minutes until someone confirms
-# it was replaced (e.g. "I have changed it"). "ok" does NOT count as confirmation.
-FILTER_INTERVAL_DAYS         = 21
-FILTER_REMINDER_INTERVAL_MIN = 10
+# Once due, send a NEW reminder message every FILTER_REMINDER_INTERVAL_HOURS
+# (daily) — a fresh top-level channel post each time, not buried in one thread —
+# until someone confirms it was replaced (e.g. "I have changed it"). "ok" does
+# NOT count as confirmation.
+FILTER_INTERVAL_DAYS           = 21
+FILTER_REMINDER_INTERVAL_HOURS = 24
 
 # ── GHS compressed-air pressure alarms (checked in ALL modes) ──────────────────
 # Read from device_states JSON (device AIR_PRESSURE_DEVICE). The PLC stores these

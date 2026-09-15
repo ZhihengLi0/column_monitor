@@ -633,9 +633,11 @@ def reset_filter_timer(state: dict, reply_ts: str = None, announce: bool = True)
 
 def check_filter_reminder(state: dict) -> None:
     """Every FILTER_INTERVAL_DAYS the chilled water filter must be replaced.
-    Once due, remind every FILTER_REMINDER_INTERVAL_MIN minutes (in one thread)
-    until someone replies that it was changed. Runs independently of alert
-    pausing/acking — only an explicit 'I have changed it' stops it."""
+    Once due, send a NEW top-level reminder message every
+    FILTER_REMINDER_INTERVAL_HOURS (daily) — a fresh channel post each time, not
+    buried in one thread — until someone confirms it was changed. Runs
+    independently of alert pausing/acking — only an explicit 'I have changed it'
+    (or @mention) stops it."""
     f   = _filter_state(state)
     now = datetime.now()
 
@@ -647,7 +649,9 @@ def check_filter_reminder(state: dict) -> None:
         else:
             return
 
-    # Active — first, look for a confirmation reply in the reminder thread.
+    # Active — first, look for a confirmation reply under the latest reminder
+    # message (reminder_ts tracks the most recent daily post). An @mention
+    # "filter replaced" is handled separately in the command path.
     if f.get("reminder_ts"):
         data = slack_get("conversations.replies",
                          {"channel": config.SLACK_CHANNEL, "ts": f["reminder_ts"]})
@@ -659,23 +663,23 @@ def check_filter_reminder(state: dict) -> None:
                     reset_filter_timer(state, reply_ts=f["reminder_ts"])
                     return
 
-    # Still due — send a reminder every FILTER_REMINDER_INTERVAL_MIN minutes.
+    # Still due — send a fresh reminder every FILTER_REMINDER_INTERVAL_HOURS.
+    interval_h = getattr(config, "FILTER_REMINDER_INTERVAL_HOURS", 24)
     last = f.get("last_reminded")
-    if last and (now - datetime.fromisoformat(last)) < timedelta(
-            minutes=config.FILTER_REMINDER_INTERVAL_MIN):
+    if last and (now - datetime.fromisoformat(last)) < timedelta(hours=interval_h):
         return
 
     msg = (":droplet: *Chilled water filter — replacement due*\n"
            f"It has been {config.FILTER_INTERVAL_DAYS} days since the last change. "
            "*Please replace the chilled water filter.*\n"
            "_Please reply `I have changed it` (or `filter replaced`) in this thread "
-           "*after you have changed it*. I'll keep reminding every "
-           f"{config.FILTER_REMINDER_INTERVAL_MIN} minutes until then — "
-           "replying `ok` will *not* stop it._")
-    ts = send_slack(msg, color="warning", thread_ts=f.get("reminder_ts"))
+           "*after you have changed it*. I'll post a new reminder once a day until "
+           "then — replying `ok` will *not* stop it._")
+    # Top-level message (no thread_ts) so each reminder is a fresh channel post.
+    ts = send_slack(msg, color="warning")
     f["last_reminded"] = now.isoformat()
-    if not f.get("reminder_ts") and ts:
-        f["reminder_ts"] = ts   # anchor all follow-up reminders in this one thread
+    if ts:
+        f["reminder_ts"] = ts   # check THIS latest post's thread for the confirmation
 
 
 # ── NLP self-learning: check thread replies for corrections ───────────────────
