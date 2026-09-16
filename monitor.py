@@ -1557,8 +1557,7 @@ def _cmd_plot(sensor_key: str, reply_ts: str, conn=None,
 
     plt.tight_layout()
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False,
-                                    dir="/home/cdms/.claude/jobs/b7b666c4/tmp") as f:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp_path = f.name
     fig.savefig(tmp_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
@@ -1670,8 +1669,7 @@ def _cmd_plot_multi(sensor_keys: list, reply_ts: str, conn=None,
     ax1.grid(True, linestyle="--", alpha=0.5)
     plt.tight_layout()
 
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False,
-                                     dir="/home/cdms/.claude/jobs/b7b666c4/tmp") as f:
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
         tmp_path = f.name
     fig.savefig(tmp_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
