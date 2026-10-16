@@ -217,8 +217,11 @@ def save_state(state: dict):
 # ── DB ────────────────────────────────────────────────────────────────────────
 
 def local_conn():
+    # statement_timeout: no single query may hang a cron run (a slow cold-cache
+    # scan once stacked up 17 overlapping runs). 45 s is far above normal (<1 s).
     kw = dict(host=config.LOCAL_PG_HOST, port=config.LOCAL_PG_PORT,
-               user=config.LOCAL_PG_USER, dbname=config.LOCAL_PG_DB, connect_timeout=5)
+               user=config.LOCAL_PG_USER, dbname=config.LOCAL_PG_DB, connect_timeout=5,
+               options="-c statement_timeout=45000")
     if config.LOCAL_PG_PASSWORD:
         kw["password"] = config.LOCAL_PG_PASSWORD
     return psycopg2.connect(**kw)
@@ -3155,12 +3158,16 @@ def check_sensor_staleness(conn, state: dict) -> list:
               s[3] if len(s) > 3 else "certain") for s in sensors]
     mappings = [s[0] for s in specs]
 
-    ph = ",".join(["%s"] * len(mappings))
+    # One MAX(time) per mapping: each is a single probe of the (mapping, time)
+    # index. The old "WHERE mapping IN (...) GROUP BY mapping" form made the
+    # planner scan the whole 23M-row table — minutes on a cold HDD cache after a
+    # reboot, which piled up cron runs (2026-10-16 incident).
+    latest = {}
     with conn.cursor() as cur:
-        cur.execute(
-            f"SELECT mapping, MAX(time) FROM public.double_value_change_events "
-            f"WHERE mapping IN ({ph}) GROUP BY mapping", mappings)
-        latest = dict(cur.fetchall())
+        for mp in mappings:
+            cur.execute("SELECT MAX(time) FROM public.double_value_change_events "
+                        "WHERE mapping = %s", (mp,))
+            latest[mp] = cur.fetchone()[0]
 
     # Global outage guard: if even the FRESHEST monitored sensor is stale, the
     # whole sync/pipeline is down (not one sensor freezing). The single global
