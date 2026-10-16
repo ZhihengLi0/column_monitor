@@ -90,7 +90,7 @@ FILTER_REMINDER_INTERVAL_HOURS = 24
 # every EYEWASH_REMINDER_INTERVAL_HOURS until someone replies "yes" under the
 # latest reminder. Once confirmed, no more reminders until the next week.
 # Set EYEWASH_SLACK_USER_ID to the person's Slack member ID; None = disabled.
-EYEWASH_SLACK_USER_ID           = None   # e.g. "U0XXXXXXXXX"
+EYEWASH_SLACK_USER_ID           = "U0B44KPDXQA"   # James
 EYEWASH_START_WEEKDAY           = 0      # 0 = Monday
 EYEWASH_START_HOUR              = 9      # 09:00 local
 EYEWASH_REMINDER_INTERVAL_HOURS = 6
