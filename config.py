@@ -83,6 +83,18 @@ CS2_ALERT_MIN_SEVERITY = 2
 FILTER_INTERVAL_DAYS           = 21
 FILTER_REMINDER_INTERVAL_HOURS = 24
 
+# ── Weekly eyewash-equipment check reminder ───────────────────────────────────
+# Every week, @mention EYEWASH_SLACK_USER_ID asking them to check the eyewash
+# equipment. The first reminder of the week goes out at EYEWASH_START_WEEKDAY
+# (0 = Monday) EYEWASH_START_HOUR local time; after that a NEW top-level reminder
+# every EYEWASH_REMINDER_INTERVAL_HOURS until someone replies "yes" under the
+# latest reminder. Once confirmed, no more reminders until the next week.
+# Set EYEWASH_SLACK_USER_ID to the person's Slack member ID; None = disabled.
+EYEWASH_SLACK_USER_ID           = None   # e.g. "U0XXXXXXXXX"
+EYEWASH_START_WEEKDAY           = 0      # 0 = Monday
+EYEWASH_START_HOUR              = 9      # 09:00 local
+EYEWASH_REMINDER_INTERVAL_HOURS = 6
+
 # ── GHS compressed-air pressure alarms (checked in ALL modes) ──────────────────
 # Read from device_states JSON (device AIR_PRESSURE_DEVICE). The PLC stores these
 # in Pa, so thresholds below are in Pa; they are displayed in kPa (scale 0.001).

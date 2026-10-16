@@ -682,6 +682,83 @@ def check_filter_reminder(state: dict) -> None:
         f["reminder_ts"] = ts   # check THIS latest post's thread for the confirmation
 
 
+# ── Weekly eyewash-equipment check reminder ───────────────────────────────────
+
+# A reply that confirms the check was done. Plain "ok" deliberately does NOT
+# count (same rule as the filter reminder) — "yes" / "done" / "checked" do.
+_EYEWASH_YES_RE = re.compile(
+    r"\b(yes|yep|yeah|yup|done|checked|confirmed)\b|是的|好了|完成|检查了|查了",
+    re.IGNORECASE)
+
+
+def _eyewash_state(state: dict) -> dict:
+    e = state.get("eyewash")
+    if not e:
+        e = {"week": None, "confirmed": False, "last_reminded": None, "reminder_ts": None}
+        state["eyewash"] = e
+    return e
+
+
+def check_eyewash_reminder(state: dict) -> None:
+    """Weekly: @mention the eyewash owner (EYEWASH_SLACK_USER_ID) to check the
+    eyewash equipment. First reminder at EYEWASH_START_WEEKDAY/HOUR; then a NEW
+    top-level reminder every EYEWASH_REMINDER_INTERVAL_HOURS until a "yes" reply
+    under the latest reminder. Once confirmed, quiet until next week. Runs
+    independently of alert pausing/acking. Disabled while the user ID is None."""
+    uid = getattr(config, "EYEWASH_SLACK_USER_ID", None)
+    if not uid:
+        return
+    e   = _eyewash_state(state)
+    now = datetime.now()
+    year, week, _ = now.isocalendar()
+    week_key = f"{year}-W{week:02d}"
+
+    if e.get("week") != week_key:                      # new week → reset
+        e.update(week=week_key, confirmed=False, last_reminded=None, reminder_ts=None)
+    if e.get("confirmed"):
+        return
+
+    # Wait until this week's start day/hour (ISO weeks start Monday = weekday 0).
+    start_wd = getattr(config, "EYEWASH_START_WEEKDAY", 0)
+    start_hr = getattr(config, "EYEWASH_START_HOUR", 9)
+    monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0,
+                                                           second=0, microsecond=0)
+    if now < monday + timedelta(days=start_wd, hours=start_hr):
+        return
+
+    # Confirmation: a "yes" reply under the latest reminder post.
+    if e.get("reminder_ts"):
+        data = slack_get("conversations.replies",
+                         {"channel": config.SLACK_CHANNEL, "ts": e["reminder_ts"]})
+        if data.get("ok"):
+            for reply in data.get("messages", [])[1:]:
+                if reply.get("user") == config.SLACK_BOT_USER_ID:
+                    continue
+                if _EYEWASH_YES_RE.search(_unescape_slack(reply.get("text", "")).lower()):
+                    e["confirmed"] = True
+                    send_slack(":white_check_mark: Thanks — eyewash equipment check "
+                               f"confirmed for this week ({week_key}). "
+                               "I'll remind again next week.",
+                               color="good", thread_ts=e["reminder_ts"])
+                    log.info(f"Eyewash check confirmed for {week_key}")
+                    return
+
+    # Still unconfirmed — fresh top-level reminder every interval.
+    interval_h = getattr(config, "EYEWASH_REMINDER_INTERVAL_HOURS", 6)
+    last = e.get("last_reminded")
+    if last and (now - datetime.fromisoformat(last)) < timedelta(hours=interval_h):
+        return
+    msg = (f":eyes: <@{uid}> *Weekly eyewash equipment check*\n"
+           "Please check the eyewash station this week.\n"
+           f"_Reply `yes` in this thread once it's done. I'll remind every {interval_h} h "
+           "until then — after you confirm, no more reminders this week._")
+    ts = send_slack(msg, color="warning")
+    e["last_reminded"] = now.isoformat()
+    if ts:
+        e["reminder_ts"] = ts
+    log.info(f"Eyewash reminder sent for {week_key}")
+
+
 # ── NLP self-learning: check thread replies for corrections ───────────────────
 
 _CONFIRM_RE = re.compile(
@@ -3472,6 +3549,9 @@ def run():
 
         # Maintenance: chilled water filter reminder (independent of pause/ack)
         check_filter_reminder(state)
+
+        # Maintenance: weekly eyewash-equipment check (@mention owner, 6h nag until "yes")
+        check_eyewash_reminder(state)
 
         # Record pulse-tube analog values for history/plotting
         record_pulsetube(conn, state)
