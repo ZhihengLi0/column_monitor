@@ -85,14 +85,16 @@ FILTER_REMINDER_INTERVAL_HOURS = 24
 
 # ── Weekly eyewash-equipment check reminder ───────────────────────────────────
 # Every week, @mention EYEWASH_SLACK_USER_ID asking them to check the eyewash
-# equipment. The first reminder of the week goes out at EYEWASH_START_WEEKDAY
-# (0 = Monday) EYEWASH_START_HOUR local time; after that a NEW top-level reminder
+# equipment. The reminder goes out at a FIXED time: EYEWASH_START_WEEKDAY
+# (0 = Monday … 4 = Friday) at EYEWASH_START_HOUR local time — e.g. Friday 12:00.
+# The "week" runs from one Friday noon to the next (not a calendar week), so the
+# reminder never fires early. After the first post, a NEW top-level reminder
 # every EYEWASH_REMINDER_INTERVAL_HOURS until someone replies "yes" under the
-# latest reminder. Once confirmed, no more reminders until the next week.
+# latest reminder. Once confirmed, quiet until the next Friday noon.
 # Set EYEWASH_SLACK_USER_ID to the person's Slack member ID; None = disabled.
 EYEWASH_SLACK_USER_ID           = "U0B44KPDXQA"   # James
-EYEWASH_START_WEEKDAY           = 0      # 0 = Monday
-EYEWASH_START_HOUR              = 9      # 09:00 local
+EYEWASH_START_WEEKDAY           = 4      # 4 = Friday
+EYEWASH_START_HOUR              = 12     # 12:00 noon local
 EYEWASH_REMINDER_INTERVAL_HOURS = 6
 
 # ── GHS compressed-air pressure alarms (checked in ALL modes) ──────────────────

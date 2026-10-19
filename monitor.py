@@ -713,20 +713,23 @@ def check_eyewash_reminder(state: dict) -> None:
         return
     e   = _eyewash_state(state)
     now = datetime.now()
-    year, week, _ = now.isocalendar()
-    week_key = f"{year}-W{week:02d}"
 
-    if e.get("week") != week_key:                      # new week → reset
+    # The reminder "week" runs from one scheduled slot (EYEWASH_START_WEEKDAY at
+    # EYEWASH_START_HOUR, e.g. Friday 12:00) to the next — NOT a calendar/ISO
+    # week. Find the most recent slot at or before now; its date is the period
+    # key. A new period starts exactly at the next slot, so the first reminder
+    # always goes out at the fixed time and never earlier.
+    start_wd = getattr(config, "EYEWASH_START_WEEKDAY", 4)
+    start_hr = getattr(config, "EYEWASH_START_HOUR", 12)
+    slot = (now - timedelta(days=(now.weekday() - start_wd) % 7)).replace(
+        hour=start_hr, minute=0, second=0, microsecond=0)
+    if slot > now:                                     # this week's slot not yet reached
+        slot -= timedelta(days=7)
+    week_key = slot.strftime("%Y-%m-%d")               # e.g. "2026-10-23" (Friday)
+
+    if e.get("week") != week_key:                      # new period → reset
         e.update(week=week_key, confirmed=False, last_reminded=None, reminder_ts=None)
     if e.get("confirmed"):
-        return
-
-    # Wait until this week's start day/hour (ISO weeks start Monday = weekday 0).
-    start_wd = getattr(config, "EYEWASH_START_WEEKDAY", 0)
-    start_hr = getattr(config, "EYEWASH_START_HOUR", 9)
-    monday = (now - timedelta(days=now.weekday())).replace(hour=0, minute=0,
-                                                           second=0, microsecond=0)
-    if now < monday + timedelta(days=start_wd, hours=start_hr):
         return
 
     # Confirmation: a "yes" reply under the latest reminder post.
@@ -740,8 +743,8 @@ def check_eyewash_reminder(state: dict) -> None:
                 if _EYEWASH_YES_RE.search(_unescape_slack(reply.get("text", "")).lower()):
                     e["confirmed"] = True
                     send_slack(":white_check_mark: Thanks — eyewash equipment check "
-                               f"confirmed for this week ({week_key}). "
-                               "I'll remind again next week.",
+                               "confirmed for this week. "
+                               "I'll remind again next Friday at noon.",
                                color="good", thread_ts=e["reminder_ts"])
                     log.info(f"Eyewash check confirmed for {week_key}")
                     return
@@ -752,9 +755,9 @@ def check_eyewash_reminder(state: dict) -> None:
     if last and (now - datetime.fromisoformat(last)) < timedelta(hours=interval_h):
         return
     msg = (f":eyes: <@{uid}> *Weekly eyewash equipment check*\n"
-           "Please check the eyewash station this week.\n"
+           "Please check the eyewash station.\n"
            f"_Reply `yes` in this thread once it's done. I'll remind every {interval_h} h "
-           "until then — after you confirm, no more reminders this week._")
+           "until then — after you confirm, no more reminders until next Friday noon._")
     ts = send_slack(msg, color="warning")
     e["last_reminded"] = now.isoformat()
     if ts:
