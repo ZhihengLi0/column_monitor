@@ -2190,6 +2190,27 @@ def _alarm_clear(state: dict, key: str, note: str = None) -> None:
     log.info(f"Alarm cleared: {key}")
 
 
+def _latest_rows(conn, table: str, mappings: list) -> dict:
+    """Latest (mapping, value, time) row per mapping, as {mapping: dict}.
+
+    One indexed probe per mapping (`WHERE mapping = %s ORDER BY time DESC
+    LIMIT 1` walks the (mapping, time) index backwards — a handful of pages).
+    The old single `SELECT DISTINCT ON (mapping) … WHERE mapping IN (…)` made
+    the planner sort/scan tens of millions of rows; with a cold page cache after
+    a reboot (data on a spinning external HDD) that took > 45 s and hit
+    statement_timeout every run."""
+    out = {}
+    with conn.cursor() as cur:
+        for mp in mappings:
+            cur.execute(
+                f"SELECT value, time FROM public.{table} "
+                f"WHERE mapping = %s ORDER BY time DESC LIMIT 1", (mp,))
+            r = cur.fetchone()
+            if r is not None:
+                out[mp] = {"mapping": mp, "value": r[0], "time": r[1]}
+    return out
+
+
 def check_sensor_thresholds(conn, state: dict) -> list:
     thresholds = active_thresholds(state)
     if not thresholds:
@@ -2201,14 +2222,7 @@ def check_sensor_thresholds(conn, state: dict) -> list:
     acked    = state.setdefault("acked_sensors", {})
 
     mappings = list(thresholds.keys())
-    ph = ",".join(["%s"] * len(mappings))
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            f"SELECT DISTINCT ON (mapping) mapping, value, time "
-            f"FROM public.double_value_change_events "
-            f"WHERE mapping IN ({ph}) ORDER BY mapping, time DESC",
-            mappings)
-        rows = cur.fetchall()
+    rows = list(_latest_rows(conn, "double_value_change_events", mappings).values())
 
     for row in rows:
         name  = row["mapping"]
@@ -2450,14 +2464,7 @@ def check_transitioning_devices(conn, state: dict) -> list:
     acked    = state.setdefault("acked_sensors", {})
     mappings = [m for m, _ in required]
 
-    ph = ",".join(["%s"] * len(mappings))
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-        cur.execute(
-            f"SELECT DISTINCT ON (mapping) mapping, value, time "
-            f"FROM public.boolean_value_change_events "
-            f"WHERE mapping IN ({ph}) ORDER BY mapping, time DESC",
-            mappings)
-        rows = {r["mapping"]: r for r in cur.fetchall()}
+    rows = _latest_rows(conn, "boolean_value_change_events", mappings)
 
     label_map = dict(required)
     for mapping in mappings:
