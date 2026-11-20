@@ -550,7 +550,35 @@ def _silence_request(text: str):
     return ((datetime.now() + timedelta(minutes=mins)).isoformat(), label)
 
 
+def _prune_tracking(state: dict) -> None:
+    """Drop stale bookkeeping so Slack polling stays bounded.
+
+    pending_alert_msgs was never pruned: on 2026-11-20 it held 30 entries while
+    active_alarms was empty, i.e. 60 wasted Slack GETs every minute (and 60 x
+    10 s timeouts per run while the network was down). Keep an entry only while
+    its alarm is still active or for 24 h after it was posted; also drop expired
+    acked_sensors entries (some dated back to August)."""
+    now = datetime.now()
+    pending = state.setdefault("pending_alert_msgs", {})
+    active  = state.get("active_alarms", {}) or {}
+    for key in list(pending):
+        try:
+            posted = datetime.fromtimestamp(float(pending[key]["ts"]))
+        except Exception:
+            posted = now
+        if key not in active and (now - posted) > timedelta(hours=24):
+            del pending[key]
+    acked = state.setdefault("acked_sensors", {})
+    for key in list(acked):
+        try:
+            if datetime.fromisoformat(acked[key]) <= now:
+                del acked[key]
+        except Exception:
+            del acked[key]
+
+
 def check_acknowledgements(state: dict):
+    _prune_tracking(state)
     pending   = state.setdefault("pending_alert_msgs", {})
     acked     = state.setdefault("acked_sensors", {})
 
@@ -561,6 +589,11 @@ def check_acknowledgements(state: dict):
 
         # 1. Emoji reaction → default 10-minute silence
         data = slack_get("reactions.get", {"channel": ch, "timestamp": ts})
+        if not data:
+            # Transport failure (Slack unreachable): don't burn a 10 s timeout
+            # on every remaining entry — they'd all fail the same way.
+            log.warning("Slack unreachable — skipping remaining ack polling this run")
+            return
         if data.get("ok"):
             rxns = data.get("message", {}).get("reactions", [])
             if any(r["name"] in ACK_REACTIONS for r in rxns):
@@ -3542,8 +3575,25 @@ def run():
     except Exception as e:
         log.error(f"DB connect failed: {e}")
         if not INIT_MODE:
-            send_slack(f":sos: *BlueFors Monitor* cannot connect to database: {e}")
+            # One SOS per ALERT_COOLDOWN_MINUTES, not one per minute (2026-11-20:
+            # a reboot produced a burst of identical posts). Recovery is announced
+            # by the next successful run below.
+            last = state.get("last_db_down_alert")
+            cooldown = timedelta(minutes=config.ALERT_COOLDOWN_MINUTES)
+            if not last or datetime.now() - datetime.fromisoformat(last) >= cooldown:
+                if send_slack(f":sos: *BlueFors Monitor* cannot connect to database: {e}\n"
+                              f"_I'll say so again in {config.ALERT_COOLDOWN_MINUTES} min "
+                              "if it is still down, and post when it is back._"):
+                    state["last_db_down_alert"] = datetime.now().isoformat()
+            state["db_down_since"] = state.get("db_down_since") or datetime.now().isoformat()
+            save_state(state)
         return
+
+    if state.pop("db_down_since", None):
+        state.pop("last_db_down_alert", None)
+        send_slack(":white_check_mark: *Database reachable again* — monitoring resumed.",
+                   color="good")
+        log.info("DB reachable again")
 
     try:
         if INIT_MODE:
@@ -3632,6 +3682,7 @@ def run():
 
     pending = state.setdefault("pending_alert_msgs", {})
     active  = state.setdefault("active_alarms", {})
+    sent = failed = 0
     for sensor_name, msg in all_alerts:
         ts = send_slack(msg)
         if ts and sensor_name:
@@ -3639,10 +3690,21 @@ def run():
             # Remember the alarm's thread ts so its '✅ Cleared' can reply in-thread.
             if sensor_name in active and isinstance(active[sensor_name], dict):
                 active[sensor_name]["ts"] = ts
+        if ts:
+            sent += 1
+        else:
+            failed += 1
+            # The check already consumed the cooldown for this key before we
+            # knew the post failed; refund it so the alarm is retried next
+            # minute instead of going silent for ALERT_COOLDOWN_MINUTES.
+            if sensor_name:
+                state.get("last_alert_time", {}).pop(sensor_name, None)
 
     save_state(state)
-    if all_alerts:
-        log.info(f"Sent {len(all_alerts)} alert(s)")
+    if failed:
+        log.error(f"Slack unreachable: {failed} alert(s) NOT delivered, {sent} sent")
+    elif sent:
+        log.info(f"Sent {sent} alert(s)")
     else:
         log.debug("No alerts this cycle")
 

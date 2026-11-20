@@ -1,0 +1,8 @@
+[Unit]
+Description=Probe internet reachability and bounce Wi-Fi if it is gone
+After=network.target NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/cdms/bluefors_monitor/deploy/net-watchdog.sh
+Environment=WIFI_CON=UofM-Guest
