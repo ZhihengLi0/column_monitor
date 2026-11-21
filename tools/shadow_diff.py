@@ -78,8 +78,13 @@ def main() -> None:
             diffs.append(f"cleared {sorted(L.get('cleared', []))} vs {sorted(S.get('cleared', []))}")
         if l_events != s_events:
             diffs.append(f"events {l_events} vs {s_events}")
-        if L.get("cursors") != S.get("cursors"):
-            diffs.append(f"cursors {L.get('cursors')} vs {S.get('cursors')}")
+        lc, sc = dict(L.get("cursors") or {}), dict(S.get("cursors") or {})
+        # R1A_PUMP_POWER changes every few seconds; the two recorders sample
+        # ~35 s apart inside the same minute, so that cursor always differs.
+        if lc.pop("last_r1a_power_id", None) != sc.pop("last_r1a_power_id", None):
+            accepted["R1A power cursor timing"] += 1
+        if lc != sc:
+            diffs.append(f"cursors {lc} vs {sc}")
         if L.get("errors") or S.get("errors"):
             diffs.append(f"errors legacy={L.get('errors')} shadow={S.get('errors')}")
         if diffs:
