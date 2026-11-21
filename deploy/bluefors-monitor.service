@@ -1,0 +1,30 @@
+[Unit]
+Description=BlueFors + LN2 lab monitor (Slack bot, alarms, data recording)
+Documentation=file:///home/cdms/bluefors_monitor/README.md
+# Data lives on the external HDD; PostgreSQL only starts once it is mounted.
+RequiresMountsFor=/mnt/harddrive
+After=network-online.target postgresql@17-main.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=cdms
+Group=cdms
+WorkingDirectory=/home/cdms/bluefors_monitor
+ExecStart=/usr/bin/python3 -m bfm.cli serve
+Restart=always
+RestartSec=10
+# The daemon pings WATCHDOG=1 after every check; if it hangs > 5 min systemd kills + restarts it.
+WatchdogSec=300
+TimeoutStopSec=30
+# Plots / temp files go here (cleaned on stop); never inherit a stale TMPDIR.
+RuntimeDirectory=bluefors
+Environment=TMPDIR=/run/bluefors
+Environment=PYTHONUNBUFFERED=1
+Environment=MPLCONFIGDIR=/run/bluefors/mpl
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bfm
+
+[Install]
+WantedBy=multi-user.target

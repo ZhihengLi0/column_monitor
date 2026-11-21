@@ -1,0 +1,24 @@
+[Unit]
+Description=LN2 scale reader (Arduino TCP → PostgreSQL ln2.scale_readings)
+RequiresMountsFor=/mnt/harddrive
+After=network-online.target postgresql@17-main.service
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=cdms
+Group=cdms
+WorkingDirectory=/home/cdms/ln2_monitor
+ExecStart=/usr/bin/python3 /home/cdms/ln2_monitor/ln2_reader.py
+Restart=always
+RestartSec=5
+# A reading arrives every ~5 s; no WATCHDOG ping for 10 min = stuck → restart.
+WatchdogSec=600
+TimeoutStopSec=15
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ln2-reader
+
+[Install]
+WantedBy=multi-user.target

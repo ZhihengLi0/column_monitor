@@ -1,0 +1,14 @@
+# /etc/logrotate.d/bfm — belt-and-braces for anything that still writes a
+# plain file under the monitor directories (the daemon itself uses a
+# RotatingFileHandler; journald is capped by SystemMaxUse).
+/mnt/harddrive/pi/logs/*.log /mnt/harddrive/pi/logs/*.jsonl /mnt/harddrive/pi/logs/*.err /home/cdms/bluefors_monitor/*.log /home/cdms/ln2_monitor/*.log /home/cdms/*.log {
+    su cdms cdms
+    weekly
+    rotate 8
+    size 20M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
