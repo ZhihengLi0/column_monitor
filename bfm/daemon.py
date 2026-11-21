@@ -190,7 +190,9 @@ class Daemon:
 
     @staticmethod
     def _err(e: Exception) -> str:
-        log.error("check failed: %s", e, exc_info=True)
+        # A database outage is expected and already reported by the DB_DOWN
+        # alarm; a traceback per check would only bloat the journal.
+        log.error("check failed: %s", e, exc_info=not isinstance(e, DatabaseUnavailable))
         return f"{type(e).__name__}: {str(e)[:200]}"
 
     # ── scheduled 12 h summary ───────────────────────────────────────────────

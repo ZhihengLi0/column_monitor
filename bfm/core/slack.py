@@ -112,6 +112,12 @@ class SlackClient:
         return {r.get("name") for r in data.get("message", {}).get("reactions", [])}
 
     def history(self, oldest: str, limit: int = 50) -> list[dict]:
+        # Slack silently returns NO messages when `oldest` has more than six
+        # decimals (e.g. str(time.time()) → 7); normalise to a Slack-style ts.
+        try:
+            oldest = f"{float(oldest):.6f}"
+        except (TypeError, ValueError):
+            pass
         data = self.get("conversations.history",
                         {"channel": self.channel, "oldest": oldest, "limit": limit})
         if not data.get("ok"):
