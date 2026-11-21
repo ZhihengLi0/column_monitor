@@ -25,6 +25,29 @@ $StateFile = Join-Path $PSScriptRoot "win_sync_state.json"
 $LogFile   = Join-Path $PSScriptRoot "win_sync.log"
 $BatchSize = 5000
 
+# --- Hardening (2026-11) ---
+# When the Pi reboots mid-COPY, psql used to hang on the dead TCP connection
+# for ~2 hours (Windows TCP keepalive default) and every scheduled run was
+# skipped meanwhile. Connection-level timeouts + keepalives fix that; a
+# statement timeout bounds a single stuck query; and a stale instance older
+# than MaxRunMinutes is killed at start.
+$env:PGCONNECT_TIMEOUT = "10"
+$env:PGOPTIONS         = "-c statement_timeout=120000"
+$RemoteConn = "host=$RemoteHost port=$RemotePort user=$RemoteUser dbname=$RemoteDB " +
+              "connect_timeout=10 keepalives=1 keepalives_idle=30 keepalives_interval=10 keepalives_count=3"
+$LocalConn  = "host=$LocalHost port=$LocalPort user=$LocalUser dbname=$LocalDB connect_timeout=10"
+$MaxRunMinutes = 5
+
+# Kill any previous instance of this script that has been running too long.
+$me = $PID
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" | Where-Object {
+    $_.ProcessId -ne $me -and $_.CommandLine -like "*sync_push.ps1*" -and
+    ((Get-Date) - $_.CreationDate).TotalMinutes -gt $MaxRunMinutes
+} | ForEach-Object {
+    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    Add-Content $LogFile "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') killed stale sync instance PID $($_.ProcessId)"
+}
+
 $tables = @(
     "double_value_change_events",
     "int_value_change_events",
@@ -59,7 +82,8 @@ function Log($msg) {
 
 function RunPsql($h, $p, $u, $pw, $db, $sql) {
     $env:PGPASSWORD = $pw
-    $result = & $psql -h $h -p $p -U $u -d $db -t -A -c $sql 2>$null
+    $conn = if ($h -eq $RemoteHost) { $RemoteConn } else { $LocalConn }
+    $result = & $psql "$conn" -t -A -c $sql 2>$null
     return $result
 }
 
@@ -68,7 +92,7 @@ function LoadState() {
         $json = Get-Content $StateFile -Raw | ConvertFrom-Json
         $ht = @{}
         foreach ($prop in $json.PSObject.Properties) {
-            $ht[$prop.Name] = @{ last_id = [int]$prop.Value.last_id }
+            $ht[$prop.Name] = @{ last_id = [long]$prop.Value.last_id }
         }
         return $ht
     }
@@ -89,7 +113,7 @@ function InitStateFromRemote() {
             "SELECT COALESCE(MAX(id), 0) FROM public.$tbl"
         $maxId = ($maxId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
         if (-not $maxId) { $maxId = 0 }
-        $state[$tbl] = @{ last_id = [int]$maxId }
+        $state[$tbl] = @{ last_id = [long]$maxId }
         Log "  $tbl : will sync from id > $maxId"
     }
     return $state
@@ -120,7 +144,7 @@ Log "Connected to Raspberry Pi OK"
 
 # Test local CS2 connection
 $env:PGPASSWORD = $LocalPass
-$localTest = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB -t -A `
+$localTest = & $psql "$LocalConn" -t -A `
     -c "SELECT COUNT(*) FROM double_value_change_events;" 2>&1
 if ($LASTEXITCODE -ne 0) {
     Log "ERROR: Cannot connect to local CS2 database - $localTest"
@@ -144,7 +168,7 @@ foreach ($tbl in $tables) {
 
     # Export new rows from local CS2
     $env:PGPASSWORD = $LocalPass
-    $copyOut = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
+    $copyOut = & $psql "$LocalConn" `
         -c "\copy (SELECT * FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) TO stdout WITH CSV" `
         2>$null
 
@@ -153,7 +177,7 @@ foreach ($tbl in $tables) {
 
     # Import to Raspberry Pi (no ON CONFLICT needed - we only send new rows)
     $env:PGPASSWORD = $RemotePass
-    $importErr = $lines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
+    $importErr = $lines | & $psql "$RemoteConn" `
         -c "\copy public.$tbl FROM stdin WITH CSV" 2>&1
 
     if ($LASTEXITCODE -eq 0) {
@@ -161,7 +185,7 @@ foreach ($tbl in $tables) {
             "SELECT id FROM (SELECT id FROM public.$tbl WHERE id > $lastId ORDER BY id LIMIT $BatchSize) t ORDER BY id DESC LIMIT 1"
         $newId = ($newId | Where-Object { $_ -match '^\d+$' } | Select-Object -First 1)
         if ($newId) {
-            $state[$tbl] = @{ last_id = [int]$newId }
+            $state[$tbl] = @{ last_id = [long]$newId }
             $total += $lines.Count
             Log "  $tbl : +$($lines.Count) rows (last id: $newId)"
         }
@@ -172,14 +196,14 @@ foreach ($tbl in $tables) {
 
 # device_states: full refresh (no id column)
 $env:PGPASSWORD = $LocalPass
-$dsData = & $psql -h $LocalHost -p $LocalPort -U $LocalUser -d $LocalDB `
+$dsData = & $psql "$LocalConn" `
     -c "\copy (SELECT * FROM public.device_states) TO stdout WITH CSV" 2>$null
 $dsLines = @($dsData | Where-Object { $_ -and $_ -ne "" })
 if ($dsLines.Count -gt 0) {
     $env:PGPASSWORD = $RemotePass
     # Clear and re-import device states
     RunPsql $RemoteHost $RemotePort $RemoteUser $RemotePass $RemoteDB "TRUNCATE public.device_states" | Out-Null
-    $dsLines | & $psql -h $RemoteHost -p $RemotePort -U $RemoteUser -d $RemoteDB `
+    $dsLines | & $psql "$RemoteConn" `
         -c "\copy public.device_states FROM stdin WITH CSV" 2>$null | Out-Null
     Log "  device_states: updated $($dsLines.Count) devices"
 }
