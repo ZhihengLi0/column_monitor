@@ -349,11 +349,17 @@ class Daemon:
         log.warning("offline digest posted (gap %.0f min): %s", gap.total_seconds() / 60, "ok" if ts else "FAILED")
 
     def _track_slack_health(self) -> None:
+        """Record when Slack went away; on recovery post the offline digest
+        even if nothing is queued — people must learn the bot was offline
+        (the 10-day silence of Nov 2026 went unnoticed for exactly that reason)."""
         with self.store.locked() as st:
             sl = st.setdefault("slack", {})
             if not self.slack.ok and not sl.get("down_since"):
                 sl["down_since"] = tu.now().isoformat()
             sl["ok"] = self.slack.ok
+            recovered = self.slack.ok and bool(sl.get("down_since"))
+        if recovered:
+            self._maybe_offline_digest()
 
     # ── threads ──────────────────────────────────────────────────────────────
     def _check_loop(self) -> None:

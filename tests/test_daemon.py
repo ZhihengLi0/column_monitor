@@ -132,6 +132,26 @@ def test_offline_digest_posted_first_after_long_outage(d):
     assert d.store.data["slack"]["down_since"] is None
 
 
+def test_digest_posted_on_recovery_even_with_empty_outbox(d):
+    with d.store.locked() as st:
+        st["slack"]["down_since"] = (tu.now() - timedelta(minutes=25)).isoformat()
+    d.slack.ok = True
+    d._track_slack_health()
+    assert len(d.slack.posts) == 1 and "offline from Slack for 0.4 h" in d.slack.posts[0]["text"]
+    assert "No alarms active right now" in d.slack.posts[0]["text"]
+    assert d.store.data["slack"]["down_since"] is None
+    d._track_slack_health()                                   # idempotent
+    assert len(d.slack.posts) == 1
+
+
+def test_no_digest_while_still_down(d):
+    with d.store.locked() as st:
+        st["slack"]["down_since"] = (tu.now() - timedelta(hours=1)).isoformat()
+    d.slack.ok = False
+    d._track_slack_health()
+    assert d.slack.posts == [] and d.store.data["slack"]["down_since"] is not None
+
+
 def test_short_outage_has_no_digest(d):
     with d.store.locked() as st:
         st["slack"]["down_since"] = (tu.now() - timedelta(minutes=3)).isoformat()
