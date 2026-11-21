@@ -8,6 +8,7 @@ Data is synced every minute from the Windows CS2 PC to a Raspberry Pi, which run
 ## Table of Contents
 
 1. [Architecture](#architecture)
+1a. [Running the System (v5)](#running-the-system-v5)
 2. [Network](#network)
 3. [Operating Modes](#operating-modes)
 4. [Raspberry Pi Setup](#raspberry-pi-setup)
@@ -40,15 +41,109 @@ Windows PC (BlueFors CS2)                    Raspberry Pi
 │  PostgreSQL 14.9 (port 5434) │             │  /mnt/harddrive/cs2_database   │
 │                              │   TCP 5432  │                                │
 │  sync_push.ps1  ─────────────┼────────────►│  cs2 database  (mirror)        │
-│  Windows Task Scheduler      │             │                                │
-│  every 1 minute              │             │  monitor.py  ──────────────────┼──► Slack
-└──────────────────────────────┘             │  cron, every 1 minute          │
+│  Windows Task Scheduler      │             │  ln2 database  (scale)         │
+│  every 1 minute              │             │                                │
+└──────────────────────────────┘             │  bluefors-monitor.service ─────┼──► Slack
+                                             │   (bfm daemon, 3 threads)      │
+LN2 scale (Arduino, TCP 5000) ──────────────►│  ln2-reader.service            │
+                                             │  net-watchdog.timer            │
                                              └────────────────────────────────┘
 ```
+
+Since **v5.0.0 (2026-11-20)** the monitor is one supervised systemd service (`bluefors-monitor.service`)
+built from the `bfm/` package. The legacy `monitor.py` cron job and `slack_responder.py` process are no
+longer used (kept in the repo for one rollback window; tag `v4.13.2-legacy`). See
+[Running the System (v5)](#running-the-system-v5).
 
 **Why Windows pushes to Pi instead of Pi pulling from Windows:**  
 The Pi cannot initiate a TCP connection to the Windows machine (no open inbound port on Windows).  
 The Windows machine can reach the Pi on port 5432. So the PowerShell script runs as a Windows Scheduled Task and pushes data outward every minute.
+
+---
+
+## Running the System (v5)
+
+### Services
+
+| Unit | What it does | Check |
+|---|---|---|
+| `bluefors-monitor.service` | The bot: alarm checks every 60 s, Slack commands every 5 s, one sender thread for all posts. `Type=notify`, `WatchdogSec=300`, `Restart=always` | `systemctl status bluefors-monitor` · `journalctl -u bluefors-monitor -f` |
+| `ln2-reader.service` | Reads the LN2 scale over TCP and inserts straight into the `ln2` database; spools to `/mnt/harddrive/pi/logs/ln2_spool.txt` if the DB is down and replays later | `journalctl -u ln2-reader -n 20` |
+| `net-watchdog.timer` | Every 2 min: `curl https://slack.com/api/api.test` (certificate checked). 3 failures in a row → `nmcli` bounces the Wi-Fi; retries every 15 min while still down. Never reboots | `journalctl -t net-watchdog -n 20` |
+| `postgresql@17-main.service` | Has a drop-in that waits for `/mnt/harddrive` so a reboot never starts it before the data drive is mounted | `systemctl status postgresql@17-main` |
+
+```bash
+# after editing anything under bfm/ (commands, alarms, config):
+sudo systemctl restart bluefors-monitor
+
+# full redeploy (units + logrotate + tests + restart):
+deploy/install.sh
+
+# one dry-run check cycle against the live DB, nothing is posted:
+python3 -m bfm.cli once
+
+# run a Slack command offline / post it for real:
+python3 -m bfm.cli cmd "plot MXC2 12h"
+python3 -m bfm.cli summary [--post]
+
+# tests (python3-pytest from apt):
+python3 -m pytest -q tests
+```
+
+### Package layout
+
+```
+bfm/
+  config.py           thresholds, sensors, timing (imports config_secret.py)
+  core/state.py       StateStore – single owner of monitor_state.json, atomic save, outbox queue
+  core/db.py          persistent psycopg2 connection, auto-reconnect, DataContext (per-cycle cache)
+  core/slack.py       SlackClient – circuit breaker, 429 handling, probe while down
+  core/units.py       sensor registry, unit/duration parsing & formatting (one copy)
+  core/timeutil.py    America/Chicago via zoneinfo (DST correct)
+  modes.py            IDLE / TRANSITIONING / COLD detection, overrides
+  alarms.py           AlarmEngine + every condition alarm (thresholds, staleness, device health, LN2 …)
+  events.py           cursor-based watchers (CS2 alerts, R1A, heaters, valves) with LIMIT + reset guard
+  reminders.py        filter (21 d) and eyewash (Friday 12:00) reminders
+  commands/           Slack command router, readings, plots, status, control, ln2, NLP fallback
+  summary.py          12 h summary (08:00 / 20:00)
+  recording.py        pulse-tube readings table + 1-year retention
+  daemon.py           three threads, sd_notify, SIGTERM → persist
+  cli.py              serve | once | shadow | summary | init | status | cmd
+deploy/               systemd units, net-watchdog, logrotate, install.sh, cutover.sh
+tools/                legacy_decisions.py + shadow_diff.py (phase-5 validation harness)
+tests/                pytest suite (fake DB / fake Slack)
+```
+
+### How outages are handled
+
+* **Slack unreachable** – alarms are queued in the state file (per-key collapse: only the latest text of an
+  alarm is kept; a `Cleared` for an alarm nobody saw drops both). While down, one `api.test` probe per
+  55 s, no other calls. Back after > 10 min → one digest message (window, what was collapsed, commands
+  skipped), then the queue. Cooldown is consumed when a message is *queued*, so a failed send never eats it.
+* **Database unreachable** – one alarm with cooldown + one recovery message. Commands that need no DB
+  (`help`, `pause`, `status`) still answer.
+* **Daemon crash / hang** – systemd restarts it in 10 s; the watchdog kills it if no check completes for
+  5 min. State is written atomically after every cycle.
+* **Reboot** – PostgreSQL waits for the HDD; both services start on boot; the first cycle resets any
+  event cursor that is 0 or beyond `MAX(id)` to `MAX(id)` instead of replaying history.
+* **Old commands** – @mentions older than 15 min (sent during an outage) are skipped, not replayed.
+
+### Files on the Pi
+
+| Path | Purpose |
+|---|---|
+| `/home/cdms/bluefors_monitor/monitor_state.json` | runtime state incl. outbox (written by the daemon only) |
+| `/mnt/harddrive/pi/logs/` | daemon file log (`bfm.log`, rotated), ln2 spool, shadow/legacy decision logs |
+| `/mnt/harddrive/pi/backups/cutover_*` | crontab + state backups taken by `deploy/cutover.sh` |
+| `/run/bluefors/` | plot temp files (RuntimeDirectory, cleaned on stop) |
+
+### Rollback to v4 (if ever needed)
+
+```bash
+sudo systemctl disable --now bluefors-monitor ln2-reader
+crontab /mnt/harddrive/pi/backups/cutover_<date>/crontab.legacy
+git checkout v4.13.2-legacy -- monitor.py slack_responder.py config.py
+```
 
 ---
 
@@ -745,23 +840,13 @@ Initialised: last_cs2_alert_id=1134, skipped alerts for 11 sensors
 --init complete.
 ```
 
-### Step 4 — Pi: install cron job
+### Step 4 — Pi: install the services
 
 ```bash
-bash setup_cron.sh
+deploy/install.sh        # installs + enables bluefors-monitor, ln2-reader, net-watchdog; restarts them
 ```
 
-This writes the following line to crontab:
-
-```
-* * * * * python3 /home/cdms/bluefors_monitor/monitor.py >> /home/cdms/bluefors_monitor/monitor.log 2>&1
-```
-
-Verify:
-
-```bash
-crontab -l
-```
+(Before v5 this step was `bash setup_cron.sh`, which installed a per-minute cron job for `monitor.py`.)
 
 ### Step 5 — Verify everything is running
 
@@ -1275,14 +1360,16 @@ During cool-down the 50K temperature should pass through the TRANSITIONING band 
 | `win_sync.log` | Windows `C:\bluefors_monitor\` | Sync run log (auto-generated) |
 | `config.py` | Pi `/home/cdms/bluefors_monitor/` | Threshold settings, air-pressure & filter config, device-flag ignore list. Imports secrets from `config_secret.py` |
 | `config_secret.py` | Pi `/home/cdms/bluefors_monitor/` | **Local only, git-ignored** — DB password and Slack bot token |
-| `monitor.py` | Pi `/home/cdms/bluefors_monitor/` | Alert monitor + Slack command handler (cron every minute; threshold/device-health/air-pressure/filter checks; NLP dispatch) |
-| `slack_responder.py` | Pi `/home/cdms/bluefors_monitor/` | Fast Slack responder — polls every 5 s for instant command replies; runs as background process |
+| `bfm/` | Pi `/home/cdms/bluefors_monitor/` | **v5 monitor package** — run by `bluefors-monitor.service` (see [Running the System (v5)](#running-the-system-v5)) |
+| `deploy/` | Pi `/home/cdms/bluefors_monitor/` | systemd units, net-watchdog, logrotate, `install.sh`, `cutover.sh`, cut-over announcement |
+| `tests/` | Pi `/home/cdms/bluefors_monitor/` | pytest suite (231 tests) |
+| `tools/` | Pi `/home/cdms/bluefors_monitor/` | `legacy_decisions.py` / `shadow_diff.py` — harness used to validate v5 against v4 before cut-over |
+| `monitor.py` | Pi `/home/cdms/bluefors_monitor/` | **Legacy (v4)** cron monitor — no longer runs; kept for the rollback window |
+| `slack_responder.py` | Pi `/home/cdms/bluefors_monitor/` | **Legacy (v4)** responder — no longer runs; kept for the rollback window |
 | `nlp_intent.py` | Pi `/home/cdms/bluefors_monitor/` | Local NLP classifier (TF-IDF + Logistic Regression); bilingual intent classification and entity extraction |
 | `nlp_user_examples.jsonl` | Pi `/home/cdms/bluefors_monitor/` | User-corrected training examples accumulated via self-learning (auto-generated; do not delete) |
-| `setup_cron.sh` | Pi `/home/cdms/bluefors_monitor/` | Installs the cron job |
 | `monitor_state.json` | Pi `/home/cdms/bluefors_monitor/` | Runtime state — alert times, acks, overrides, NLP context (auto-generated) |
-| `monitor.log` | Pi `/home/cdms/bluefors_monitor/` | Monitor run log (auto-generated) |
-| `responder.log` | Pi `/home/cdms/bluefors_monitor/` | Slack responder log (auto-generated) |
+| `bfm.log` | Pi `/mnt/harddrive/pi/logs/` | Daemon log (also in `journalctl -u bluefors-monitor`); `monitor.log` / `responder.log` were the v4 logs |
 
 ---
 
@@ -1355,6 +1442,14 @@ This release series marks a fundamental shift: the bot moves from rigid command 
 | 4.8.1 | [v4.8.1](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.8.1) | **Data-driven staleness thresholds + confidence wording** — per-sensor limits set from each sensor's real 7-day gap distribution to avoid false alarms (main thermometers 5 min; 50K 10 min; pressures 30 min, P4 45; B1A/B2 6 h — these are value-change events, so stable values gap). Two alarm styles: steady thermometers get a definite ":sos: Sensor not updating"; sensors that naturally gap when stable get a softer ":grey_question: no update for a while — may be steady or offline, worth a look". Silencing an alarm also quiets its recovery message |
 | 4.7.0 | [v4.7.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.7.0) | **Pulse-tube recording & plotting** — the compressor's coolant-in/out, oil, helium temperatures, high/low pressure and motor current are logged every minute to `pulsetube_readings` (device_states keeps only the latest snapshot). Plot them with `plot coolant in 2h`, `plot oil temp 12h`, `plot high pressure 1d`, `plot motor current`, etc. (temps in °C, pressures in psi) |
 | 4.5.0 | [v4.5.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v4.5.0) | **LN2 integration, dew-point alarm & threshold fixes** — `@mention` queries about liquid nitrogen (`ln2`, `weight`, `液氮`, …) are routed to the separate [ln2_monitor](https://github.com/ZhihengLi0/ln2_monitor) project. New CRITICAL alarm (all modes): the pulse-tube coolant-in temperature must stay above the dew point (from the LN2 humidity sensor) or the cooling line condenses. Threshold corrections: B1A/B2 are turbo pumps at room temperature → 315 K overheat limit (were 1 K / 4.5 K); He flow alarms when > 0.002 mmol/s; P5 MXC > 0.01 bar; Regulator air critical 485 → 479 kPa |
+
+### v4.6 – v4.14 — see git tags (`git tag -l 'v4.*'`); highlights: cool-down/warm-up milestones, coolant dew-point, cold-cathode logic, filter + eyewash reminders (Friday 12:00), LN2 scale commands, per-mapping index probes after the Oct 2026 reboots, phase-0 patches (v4.14.0) that stopped failed Slack sends from consuming cooldown
+
+### v5.x — Single supervised daemon (rewrite)
+
+| Version | Tag | Description |
+|---------|-----|-------------|
+| 5.0.0 | [v5.0.0](https://github.com/ZhihengLi0/column_monitor/releases/tag/v5.0.0) | **Rewrite as the `bfm` package + one systemd service** after the bot was silent for 10 days (Nov 10–20, guest Wi-Fi portal expired; the old code dropped every alert). Outbox queue with per-key collapse and an offline digest, Slack circuit breaker, persistent DB connection with reconnect, single state owner (no more cron-vs-responder races), uniform alarm engine (14 fridge + 4 LN2 checks, one cooldown/silence/Cleared rule set), event cursors with LIMIT and reset guard, DST-correct local time, LN2 reader writes straight to PostgreSQL with spool, network watchdog, systemd watchdog + auto-restart, logrotate, 231 unit tests, 24 h shadow run against the legacy code before cut-over. Same commands, same thresholds |
 
 ---
 
