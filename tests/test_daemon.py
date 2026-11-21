@@ -137,7 +137,7 @@ def test_digest_posted_on_recovery_even_with_empty_outbox(d):
         st["slack"]["down_since"] = (tu.now() - timedelta(minutes=25)).isoformat()
     d.slack.ok = True
     d._track_slack_health()
-    assert len(d.slack.posts) == 1 and "offline from Slack for 0.4 h" in d.slack.posts[0]["text"]
+    assert len(d.slack.posts) == 1 and "offline from Slack for 25 min" in d.slack.posts[0]["text"]
     assert "No alarms active right now" in d.slack.posts[0]["text"]
     assert d.store.data["slack"]["down_since"] is None
     d._track_slack_health()                                   # idempotent

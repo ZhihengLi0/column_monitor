@@ -337,7 +337,9 @@ class Daemon:
             n_events = sum(1 for x in ob if x.get("kind") == "event")
             collapsed = sum(x.get("collapsed", 0) for x in ob)
             active = [v.get("label", k) if isinstance(v, dict) else k for k, v in st.get("active_alarms", {}).items()]
-            text = (f":satellite: *Monitor was offline from Slack for {gap.total_seconds() / 3600:.1f} h* "
+            mins = gap.total_seconds() / 60
+            gap_txt = f"{mins / 60:.1f} h" if mins >= 60 else f"{mins:.0f} min"
+            text = (f":satellite: *Monitor was offline from Slack for {gap_txt}* "
                     f"({since.strftime('%m-%d %H:%M')} → {tu.now().strftime('%m-%d %H:%M')}). "
                     "Monitoring and data recording continued the whole time.\n"
                     f"• Queued and now being sent: {n_alarms} alarm(s), {n_events} event(s)"
