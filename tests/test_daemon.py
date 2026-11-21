@@ -21,6 +21,8 @@ class StubSlack:
         self.reactions_by_ts = {}
         self.replies_by_ts = {}
         self.history_msgs = []
+        self.gone_ts = set()               # posts Slack no longer knows
+        self.last_error = None
 
     def probe(self, force=False):
         return self.ok
@@ -35,9 +37,11 @@ class StubSlack:
         return f"{1000 + len(self.posts)}.0"
 
     def reactions(self, ts):
+        self.last_error = "message_not_found" if ts in self.gone_ts else None
         return self.reactions_by_ts.get(ts, set())
 
     def replies(self, ts):
+        self.last_error = "thread_not_found" if ts in self.gone_ts else None
         return self.replies_by_ts.get(ts, [])
 
     def history(self, oldest, limit=50):
@@ -62,6 +66,7 @@ def d(tmp_path, monkeypatch):
     dm.last_cycle = {}
     dm.cycle_count = 0
     dm.decisions = []
+    dm._last_reply_poll = -1e9
     return dm
 
 
@@ -165,6 +170,34 @@ def test_poll_replies_confirms_reminders(d):
     assert d.store.data["filter"]["active"] is False
 
 
+def test_poll_replies_forgets_deleted_posts(d):
+    from bfm.reminders import EyewashReminder
+    with d.store.locked() as st:
+        st["pending_alert_msgs"] = {"A": {"ts": "1.0", "channel": "c"}, "B": {"ts": "2.0", "channel": "c"}}
+        EyewashReminder().state(st).update(week="2026-11-20", reminder_ts="7.0", confirmed=False)
+    d.slack.gone_ts = {"1.0", "7.0"}
+    d.poll_replies()
+    st = d.store.data
+    assert "A" not in st["pending_alert_msgs"] and "B" in st["pending_alert_msgs"]
+    assert "A" not in st["acked_sensors"]
+    assert st["eyewash"]["reminder_ts"] is None
+
+
+def test_poll_replies_is_throttled(d, monkeypatch):
+    monkeypatch.setattr(config, "REPLY_POLL_S", 20)
+    with d.store.locked() as st:
+        st["pending_alert_msgs"] = {"A": {"ts": "1.0", "channel": "c"}}
+    calls = []
+    d.slack.reactions = lambda ts: calls.append(ts) or set()
+    d.poll_replies(); d.poll_replies(); d.poll_replies()
+    assert len(calls) == 1                                  # 2nd/3rd within 20 s → skipped
+    d._last_reply_poll -= 21
+    d.poll_replies()
+    assert len(calls) == 2
+    d.poll_replies(force=True)
+    assert len(calls) == 3
+
+
 # ── silence request parsing ──────────────────────────────────────────────────
 @pytest.mark.parametrize("text,label", [
     ("ok", "10 minutes"), ("OK", "10 minutes"), ("silent for 2h", "2 hours"), ("mute 30 min", "30 minutes"),
@@ -197,4 +230,38 @@ def test_scheduled_summary_once_per_slot_and_skips_when_late(d, monkeypatch):
     with d.store.locked() as st:
         d._scheduled_summary(st)                       # 20:00 slot is 90 min late → skipped
         assert st["last_summary_slot"] == late.strftime("%Y-%m-%dT20")
+    assert sum(1 for m in d.store.data["outbox"] if m["text"] == "SUMMARY") == 1
+
+
+def test_scheduled_summary_not_rearmed_by_earlier_skipped_slot(d, monkeypatch):
+    """Shadow run 2026-11-20: daemon started 18:05, 08:00 slot already too late;
+    at 20:00 the summary was queued every minute because the 08:00 'late'
+    marker overwrote last_summary_slot each cycle."""
+    monkeypatch.setattr("bfm.summary.generate_summary", lambda db, st: "SUMMARY")
+    base = tu.now().replace(hour=18, minute=5, second=0, microsecond=0)
+    monkeypatch.setattr(tu, "now", lambda: base)
+    with d.store.locked() as st:
+        d._scheduled_summary(st)                       # 08:00 is 10 h late → skipped
+        assert st["last_summary_slot"] == base.strftime("%Y-%m-%dT08")
+    for minute in range(0, 61):
+        t = base.replace(hour=20, minute=0) + timedelta(minutes=minute)
+        monkeypatch.setattr(tu, "now", lambda t=t: t)
+        with d.store.locked() as st:
+            d._scheduled_summary(st)
+    assert sum(1 for m in d.store.data["outbox"] if m["text"] == "SUMMARY") == 1
+    assert d.store.data["last_summary_slot"] == base.strftime("%Y-%m-%dT20")
+    nxt = (base + timedelta(days=1)).replace(hour=8, minute=0)   # next morning fires once
+    monkeypatch.setattr(tu, "now", lambda: nxt)
+    with d.store.locked() as st:
+        d._scheduled_summary(st); d._scheduled_summary(st)
+    assert sum(1 for m in d.store.data["outbox"] if m["text"] == "SUMMARY") == 2
+    assert d.store.data["last_summary_slot"] == nxt.strftime("%Y-%m-%dT08")
+
+
+def test_scheduled_summary_fresh_state_just_after_slot(d, monkeypatch):
+    monkeypatch.setattr("bfm.summary.generate_summary", lambda db, st: "SUMMARY")
+    t = tu.now().replace(hour=20, minute=0, second=30, microsecond=0)
+    monkeypatch.setattr(tu, "now", lambda: t)
+    with d.store.locked() as st:
+        d._scheduled_summary(st)
     assert sum(1 for m in d.store.data["outbox"] if m["text"] == "SUMMARY") == 1

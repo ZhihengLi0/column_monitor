@@ -38,6 +38,7 @@ SLACK_BOT_USER_ID = "U0BBGRB0HC4"
 # ── Daemon timing ─────────────────────────────────────────────────────────────
 CHECK_INTERVAL_S      = 60     # alarm/event/reminder cycle
 COMMAND_POLL_S        = 5      # Slack @mention polling
+REPLY_POLL_S          = 20     # ack / reminder-confirmation polling (2 GETs per open post)
 SENDER_PACE_S         = 1.0    # minimum gap between outgoing posts
 COMMAND_MAX_AGE_MIN   = 15     # ignore @mentions older than this (post-outage replay guard)
 SLACK_OFFLINE_DIGEST_MIN = 10  # after an outage longer than this, post a digest first

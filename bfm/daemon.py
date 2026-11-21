@@ -31,6 +31,7 @@ from .core.slack import SlackClient
 from .core.state import StateStore
 
 log = logging.getLogger("bfm.daemon")
+GONE_ERRORS = {"message_not_found", "thread_not_found", "channel_not_found"}
 
 
 # ── logging ──────────────────────────────────────────────────────────────────
@@ -88,6 +89,7 @@ class Daemon:
         self.stop = threading.Event()
         self.db_alarm = alarms.DatabaseDown()
         self.cycle_count = 0
+        self._last_reply_poll = -1e9
         self.last_cycle: dict = {}
         self.decisions: list[dict] = []        # dry-run / --once: per-cycle decision records
 
@@ -193,27 +195,42 @@ class Daemon:
 
     # ── scheduled 12 h summary ───────────────────────────────────────────────
     def _scheduled_summary(self, st: dict) -> None:
+        """Queue the 12 h summary for the most recent slot (08:00 / 20:00) that
+        has not been handled yet. One state key, compared by ordering, so an
+        earlier skipped slot can never re-arm a later one (shadow run 11-20:
+        the 08:00 "too late" marker flipped the key back every minute and the
+        20:00 summary was queued 18 times)."""
         now = tu.now()
+        slots = []
         for hour in config.SUMMARY_HOURS:
             slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
             if slot > now:
-                continue
-            key = slot.strftime("%Y-%m-%dT%H")
-            if st.get("last_summary_slot") == key:
-                continue
-            if now - slot > timedelta(minutes=config.SUMMARY_MAX_LATE_MIN):
-                st["last_summary_slot"] = key          # too late: skip, don't spam
-                continue
-            from .summary import generate_summary
-            st["last_summary_slot"] = key
-            self.store.enqueue(generate_summary(self.cs2, st), color="good", kind="reply",
-                               key=f"SUMMARY::{key}")
-            log.info("12 h summary queued for slot %s", key)
+                slot -= timedelta(days=1)
+            slots.append(slot)
+        slot = max(slots)                                  # latest slot at/before now
+        key = slot.strftime("%Y-%m-%dT%H")
+        if (st.get("last_summary_slot") or "") >= key:
+            return
+        st["last_summary_slot"] = key
+        if now - slot > timedelta(minutes=config.SUMMARY_MAX_LATE_MIN):
+            log.info("summary slot %s is %d min late — skipped", key, (now - slot).seconds // 60)
+            return
+        from .summary import generate_summary
+        self.store.enqueue(generate_summary(self.cs2, st), color="good", kind="reply",
+                           key=f"SUMMARY::{key}")
+        log.info("12 h summary queued for slot %s", key)
 
     # ── reply pollers (acks, reminder confirmations) ─────────────────────────
-    def poll_replies(self) -> None:
+    def poll_replies(self, force: bool = False) -> None:
+        """Scan pending alarm posts / reminder posts for acks and confirmations.
+        Throttled to REPLY_POLL_S (two GETs per pending message per pass) so a
+        busy fridge with many open alarms stays well inside Slack's rate
+        limits. A post that Slack no longer knows (deleted) is forgotten."""
+        if not force and time.monotonic() - self._last_reply_poll < config.REPLY_POLL_S:
+            return
         if not self.slack.ok and not self.slack.probe():
             return
+        self._last_reply_poll = time.monotonic()
         with self.store.locked() as st:
             pending = st.setdefault("pending_alert_msgs", {})
             acked = st.setdefault("acked_sensors", {})
@@ -224,6 +241,11 @@ class Daemon:
                 silence = None
                 if self.slack.reactions(ts) & config.ACK_REACTIONS:
                     silence = (tu.minutes_from_now(config.ACK_DEFAULT_MINUTES), f"{config.ACK_DEFAULT_MINUTES} minutes")
+                if self.slack.last_error in GONE_ERRORS:
+                    log.info("alert post for %s no longer exists (%s) — dropping from pending",
+                             key, self.slack.last_error)
+                    del pending[key]
+                    continue
                 if silence is None:
                     for reply in self.slack.replies(ts):
                         req = silence_request(reply.get("text", ""))
@@ -245,7 +267,12 @@ class Daemon:
                 s = rem.state(st)
                 if rts and (rem.name != "eyewash" or not s.get("confirmed")) and \
                         (rem.name != "filter" or s.get("active")):
-                    rem.confirm_from_replies(st, self.slack.replies(rts), self.store.enqueue)
+                    replies = self.slack.replies(rts)
+                    if self.slack.last_error in GONE_ERRORS:
+                        log.info("%s reminder post no longer exists — forgetting its ts", rem.name)
+                        s["reminder_ts"] = None
+                        continue
+                    rem.confirm_from_replies(st, replies, self.store.enqueue)
 
     # ── sender ───────────────────────────────────────────────────────────────
     def drain_outbox(self, max_msgs: int = 50) -> int:

@@ -90,6 +90,7 @@ class SlackClient:
             data = r.json()
             self._mark_up()
             if not data.get("ok"):
+                self.last_error = data.get("error")
                 log.warning("Slack GET %s: %s", endpoint, data.get("error"))
             return data
         except Exception as e:
