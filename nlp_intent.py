@@ -448,9 +448,10 @@ def add_example(text: str, intent: str, source: str = "user", from_intent: str =
             f.write(json.dumps(entry) + "\n")
         _classifier._pipeline = None  # trigger rebuild on next call
         log.info(f"NLP: learned '{text[:60]}' → {intent} [{source}]")
-        threading.Thread(target=_git_push_learned,
-                         args=(text, intent, source, from_intent),
-                         daemon=True).start()
+        # The automatic git commit+push that used to run here in a daemon
+        # thread is gone (2026-11): it hung without a timeout inside the
+        # long-lived daemon and needed a token in the git remote. Learned
+        # examples are committed with the next regular code push instead.
     except Exception as e:
         log.error(f"NLP: failed to save example: {e}")
 
